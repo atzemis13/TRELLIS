@@ -96,13 +96,17 @@ class SLatVaeMeshDecoderTrainer(BasicTrainer):
                 normal : [N x 3 x H x W] tensor of rendered normals
                 depth : [N x 1 x H x W] tensor of rendered depths
         """
+        print(f'      [_render_batch] Rendering {len(reps)} meshes, return_types={return_types}...', flush=True)
         ret = {k : [] for k in return_types}
         for i, rep in enumerate(reps):
+            print(f'      [_render_batch]   Rendering mesh {i+1}/{len(reps)}...', flush=True)
             out_dict = self.renderer.render(rep, extrinsics[i], intrinsics[i], return_types=return_types)
             for k in out_dict:
                 ret[k].append(out_dict[k][None] if k in ['mask', 'depth'] else out_dict[k])
+        print(f'      [_render_batch] Stacking results...', flush=True)
         for k in ret:
             ret[k] = torch.stack(ret[k])
+        print(f'      [_render_batch] Done.', flush=True)
         return ret
     
     @staticmethod
@@ -275,6 +279,7 @@ class SLatVaeMeshDecoderTrainer(BasicTrainer):
         batch_size: int,
         verbose: bool = False,
     ) -> Dict:
+        print(f'    [run_snapshot] Creating dataloader...', flush=True)
         dataloader = DataLoader(
             copy.deepcopy(self.dataset),
             batch_size=batch_size,
@@ -282,6 +287,7 @@ class SLatVaeMeshDecoderTrainer(BasicTrainer):
             num_workers=0,
             collate_fn=self.dataset.collate_fn if hasattr(self.dataset, 'collate_fn') else None,
         )
+        print(f'    [run_snapshot] Dataloader created.', flush=True)
 
         # inference
         ret_dict = {}
@@ -291,17 +297,25 @@ class SLatVaeMeshDecoderTrainer(BasicTrainer):
         exts = []
         ints = []
         reps = []
-        for i in range(0, num_samples, batch_size):
+        num_batches = (num_samples + batch_size - 1) // batch_size
+        for batch_idx, i in enumerate(range(0, num_samples, batch_size)):
+            print(f'    [run_snapshot] Processing batch {batch_idx+1}/{num_batches}...', flush=True)
             batch = min(batch_size, num_samples - i)
+            print(f'    [run_snapshot]   Loading data from dataloader...', flush=True)
             data = next(iter(dataloader))
+            print(f'    [run_snapshot]   Moving data to CUDA...', flush=True)
             args = recursive_to_device(data, 'cuda')
+            print(f'    [run_snapshot]   Collecting GT images...', flush=True)
             gt_images.append(args['image'] * args['alpha'][:, None])
             if self.use_color and 'normal_map' in data:
                 gt_normal_maps.append(args['normal_map'])
             gt_meshes.extend(args['mesh'])
             exts.append(args['extrinsics'])
             ints.append(args['intrinsics'])
+            print(f'    [run_snapshot]   Running decoder on latents...', flush=True)
             reps.extend(self.models['decoder'](args['latents']))
+            print(f'    [run_snapshot]   Batch {batch_idx+1}/{num_batches} done.', flush=True)
+        print(f'    [run_snapshot] All batches processed. Concatenating GT images...', flush=True)
         gt_images = torch.cat(gt_images, dim=0)
         ret_dict.update({f'gt_image': {'value': gt_images, 'type': 'image'}})
         if self.use_color and gt_normal_maps:
@@ -309,21 +323,26 @@ class SLatVaeMeshDecoderTrainer(BasicTrainer):
             ret_dict.update({f'gt_normal_map': {'value': gt_normal_maps, 'type': 'image'}})
 
         # render single view
+        print(f'    [run_snapshot] Rendering single view...', flush=True)
         exts = torch.cat(exts, dim=0)
         ints = torch.cat(ints, dim=0)
         self.renderer.rendering_options.bg_color = (0, 0, 0)
         self.renderer.rendering_options.resolution = gt_images.shape[-1]
+        print(f'    [run_snapshot]   Rendering GT meshes...', flush=True)
         gt_render_results = self._render_batch([
             MeshExtractResult(vertices=mesh['vertices'].to(self.device), faces=mesh['faces'].to(self.device))
             for mesh in gt_meshes
         ], exts, ints, return_types=['normal'])
+        print(f'    [run_snapshot]   GT meshes rendered.', flush=True)
         ret_dict.update({f'gt_normal': {'value': self._flip_normal(gt_render_results['normal'], exts, ints), 'type': 'image'}})
         return_types = ['normal']
         if self.use_color:
             return_types.append('color')
             if 'normal_map' in data:
                 return_types.append('normal_map')
+        print(f'    [run_snapshot]   Rendering reconstructed meshes (return_types={return_types})...', flush=True)
         render_results = self._render_batch(reps, exts, ints, return_types=return_types)
+        print(f'    [run_snapshot]   Reconstructed meshes rendered.', flush=True)
         ret_dict.update({f'rec_normal': {'value': render_results['normal'], 'type': 'image'}})
         if 'color' in return_types:
             ret_dict.update({f'rec_image': {'value': render_results['color'], 'type': 'image'}})
@@ -331,6 +350,7 @@ class SLatVaeMeshDecoderTrainer(BasicTrainer):
             ret_dict.update({f'rec_normal_map': {'value': render_results['normal_map'], 'type': 'image'}})
 
         # render multiview
+        print(f'    [run_snapshot] Rendering multiview...', flush=True)
         self.renderer.rendering_options.resolution = 512
         ## Build camera
         yaws = [0, np.pi / 2, np.pi, 3 * np.pi / 2]
@@ -342,7 +362,8 @@ class SLatVaeMeshDecoderTrainer(BasicTrainer):
         multiview_normals = []
         multiview_normal_maps = []
         miltiview_images = []
-        for yaw, pitch in zip(yaws, pitch):
+        for view_idx, (yaw, pitch) in enumerate(zip(yaws, pitch)):
+            print(f'    [run_snapshot]   Rendering multiview {view_idx+1}/4...', flush=True)
             orig = torch.tensor([
                 np.sin(yaw) * np.cos(pitch),
                 np.cos(yaw) * np.cos(pitch),
@@ -361,6 +382,7 @@ class SLatVaeMeshDecoderTrainer(BasicTrainer):
                 multiview_normal_maps.append(render_results['normal_map'])
 
         ## Concatenate views
+        print(f'    [run_snapshot] Concatenating multiview results...', flush=True)
         multiview_normals = torch.cat([
             torch.cat(multiview_normals[:2], dim=-2),
             torch.cat(multiview_normals[2:], dim=-2),
@@ -378,5 +400,6 @@ class SLatVaeMeshDecoderTrainer(BasicTrainer):
                 torch.cat(multiview_normal_maps[2:], dim=-2),
             ], dim=-1)
             ret_dict.update({f'multiview_normal_map': {'value': multiview_normal_maps, 'type': 'image'}})
-                            
+        
+        print(f'    [run_snapshot] Done. Returning {len(ret_dict)} results.', flush=True)
         return ret_dict

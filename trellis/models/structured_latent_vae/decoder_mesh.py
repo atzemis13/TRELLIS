@@ -61,11 +61,19 @@ class SparseSubdivideBlock3d(nn.Module):
         Returns:
             an [N x C x ...] Tensor of outputs.
         """
+        print(f'        [SparseSubdivideBlock3d] res={self.resolution} act_layers...', flush=True)
         h = self.act_layers(x)
+        print(f'        [SparseSubdivideBlock3d] res={self.resolution} sub(h)...', flush=True)
         h = self.sub(h)
+        print(f'        [SparseSubdivideBlock3d] res={self.resolution} sub(x)...', flush=True)
         x = self.sub(x)
-        h = self.out_layers(h)
+        print(f'        [SparseSubdivideBlock3d] res={self.resolution} out_layers (4 steps)...', flush=True)
+        for i, layer in enumerate(self.out_layers):
+            print(f'        [SparseSubdivideBlock3d] res={self.resolution}   out_layer {i+1}/4: {layer.__class__.__name__}...', flush=True)
+            h = layer(h)
+        print(f'        [SparseSubdivideBlock3d] res={self.resolution} skip_connection...', flush=True)
         h = h + self.skip_connection(x)
+        print(f'        [SparseSubdivideBlock3d] res={self.resolution} done.', flush=True)
         return h
 
 
@@ -155,16 +163,23 @@ class SLatMeshDecoder(SparseTransformerBase):
         """
         ret = []
         for i in range(x.shape[0]):
+            print(f'      [decoder] to_representation: extracting mesh {i+1}/{x.shape[0]}...', flush=True)
             mesh = self.mesh_extractor(x[i], training=self.training)
             ret.append(mesh)
+        print(f'      [decoder] to_representation: done.', flush=True)
         return ret
 
     def forward(self, x: sp.SparseTensor) -> List[MeshExtractResult]:
+        print(f'      [decoder] forward: running transformer...', flush=True)
         h = super().forward(x)
-        for block in self.upsample:
+        print(f'      [decoder] forward: running upsample blocks...', flush=True)
+        for block_idx, block in enumerate(self.upsample):
+            print(f'      [decoder] forward:   upsample block {block_idx+1}/{len(self.upsample)}...', flush=True)
             h = block(h)
+        print(f'      [decoder] forward: running out_layer...', flush=True)
         h = h.type(x.dtype)
         h = self.out_layer(h)
+        print(f'      [decoder] forward: calling to_representation...', flush=True)
         return self.to_representation(h)
     
 
