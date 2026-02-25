@@ -41,13 +41,14 @@ class Trainer:
         finetune_ckpt=None,
         log_param_stats=False,
         prefetch_data=True,
-        i_print=1000,
+        i_print=1,
         i_log=500,
         i_sample=10000,
         i_save=10000,
         i_ddpcheck=10000,
         **kwargs
     ):
+        print(f"i_print: {i_print}")
         assert batch_size is not None or batch_size_per_gpu is not None, 'Either batch_size or batch_size_per_gpu must be specified.'
 
         self.models = models
@@ -223,26 +224,18 @@ class Trainer:
         NOTE: This function should be called by all processes.
         """
         if self.is_master:
-            print(f'\nSampling {num_samples} images...', flush=True)
+            print(f'\nSampling {num_samples} images...', end='')
 
         if suffix is None:
             suffix = f'step{self.step:07d}'
 
         # Assign tasks
         num_samples_per_process = int(np.ceil(num_samples / self.world_size))
-        if self.is_master:
-            print(f'  [DEBUG] Running snapshot with {num_samples_per_process} samples per process, batch_size={batch_size}...', flush=True)
         samples = self.run_snapshot(num_samples_per_process, batch_size=batch_size, verbose=verbose)
-        if self.is_master:
-            print(f'  [DEBUG] run_snapshot returned {len(samples)} sample keys: {list(samples.keys())}', flush=True)
 
         # Preprocess images
-        if self.is_master:
-            print(f'  [DEBUG] Preprocessing images...', flush=True)
         for key in list(samples.keys()):
             if samples[key]['type'] == 'sample':
-                if self.is_master:
-                    print(f'  [DEBUG]   Visualizing sample key: {key}...', flush=True)
                 vis = self.visualize_sample(samples[key]['value'])
                 if isinstance(vis, dict):
                     for k, v in vis.items():
@@ -250,16 +243,10 @@ class Trainer:
                     del samples[key]
                 else:
                     samples[key] = {'value': vis, 'type': 'image'}
-        if self.is_master:
-            print(f'  [DEBUG] Preprocessing done.', flush=True)
 
         # Gather results
         if self.world_size > 1:
-            if self.is_master:
-                print(f'  [DEBUG] Gathering results from {self.world_size} processes...', flush=True)
             for key in samples.keys():
-                if self.is_master:
-                    print(f'  [DEBUG]   Gathering key: {key}...', flush=True)
                 samples[key]['value'] = samples[key]['value'].contiguous()
                 if self.is_master:
                     all_images = [torch.empty_like(samples[key]['value']) for _ in range(self.world_size)]
@@ -268,16 +255,11 @@ class Trainer:
                 dist.gather(samples[key]['value'], all_images, dst=0)
                 if self.is_master:
                     samples[key]['value'] = torch.cat(all_images, dim=0)[:num_samples]
-            if self.is_master:
-                print(f'  [DEBUG] Gathering done.', flush=True)
 
         # Save images
         if self.is_master:
-            print(f'  [DEBUG] Saving images to {os.path.join(self.output_dir, "samples", suffix)}...', flush=True)
             os.makedirs(os.path.join(self.output_dir, 'samples', suffix), exist_ok=True)
             for key in samples.keys():
-                if self.is_master:
-                    print(f'  [DEBUG]   Saving key: {key} (type={samples[key]["type"]})...', flush=True)
                 if samples[key]['type'] == 'image':
                     utils.save_image(
                         samples[key]['value'],

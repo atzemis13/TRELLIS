@@ -8,6 +8,7 @@ __attributes = {
     'SLatVaeGaussianTrainer': 'vae.structured_latent_vae_gaussian',
     'SLatVaeRadianceFieldDecoderTrainer': 'vae.structured_latent_vae_rf_dec',
     'SLatVaeMeshDecoderTrainer': 'vae.structured_latent_vae_mesh_dec',
+    'SLatVaeUDFDecoderTrainer': 'vae.structured_latent_vae_udf_dec',
     
     'FlowMatchingTrainer': 'flow_matching.flow_matching',
     'FlowMatchingCFGTrainer': 'flow_matching.flow_matching',
@@ -47,6 +48,7 @@ if __name__ == '__main__':
     from .vae.structured_latent_vae_gaussian import SLatVaeGaussianTrainer
     from .vae.structured_latent_vae_rf_dec import SLatVaeRadianceFieldDecoderTrainer
     from .vae.structured_latent_vae_mesh_dec import SLatVaeMeshDecoderTrainer
+    from .vae.structured_latent_vae_udf_dec import SLatVaeUDFDecoderTrainer
     
     from .flow_matching.flow_matching import (
         FlowMatchingTrainer,

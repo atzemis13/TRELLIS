@@ -1,19 +1,27 @@
+"""
+Structured Latent VAE UDF Decoder.
+
+This decoder predicts UDF (Unsigned Distance Field) values at FlexiCubes grid
+vertices, representing distance to the nearest BREP edge. It mirrors the
+architecture of SLatMeshDecoder for consistency.
+"""
+
 from typing import *
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
 from ...modules.utils import zero_module, convert_module_to_f16, convert_module_to_f32
 from ...modules import sparse as sp
 from .base import SparseTransformerBase
-from ...representations import MeshExtractResult
-from ...representations.mesh import SparseFeatures2Mesh
+from ...representations.mesh.udf import UDFExtractResult, SparseFeatures2UDF
 from ..sparse_elastic_mixin import SparseTransformerElasticMixin
 
 
 class SparseSubdivideBlock3d(nn.Module):
     """
     A 3D subdivide block that can subdivide the sparse tensor.
+    
+    This is identical to the one in mesh_dec.py but included here for
+    self-containment. In practice, you may want to import from a shared location.
 
     Args:
         channels: channels in the inputs and outputs.
@@ -69,7 +77,32 @@ class SparseSubdivideBlock3d(nn.Module):
         return h
 
 
-class SLatMeshDecoder(SparseTransformerBase):
+class SLatUDFDecoder(SparseTransformerBase):
+    """
+    Sparse Latent UDF Decoder.
+    
+    Predicts UDF values at FlexiCubes grid vertices from structured latents.
+    Architecture mirrors SLatMeshDecoder with:
+    - Sparse transformer backbone
+    - Two upsampling blocks: 64³ → 128³ → 256³
+    - Output layer predicting UDF at 8 corners per voxel
+    
+    Args:
+        resolution: base resolution (64), output will be resolution*4 (256)
+        model_channels: transformer hidden dimension
+        latent_channels: input latent dimension
+        num_blocks: number of transformer blocks
+        num_heads: number of attention heads
+        num_head_channels: channels per attention head (alternative to num_heads)
+        mlp_ratio: MLP hidden dim ratio
+        attn_mode: attention mode for sparse transformer
+        window_size: window size for windowed attention
+        pe_mode: positional encoding mode
+        use_fp16: use FP16 for transformer
+        use_checkpoint: use gradient checkpointing
+        qk_rms_norm: use RMS norm for QK
+        representation_config: config for UDF representation
+    """
     def __init__(
         self,
         resolution: int,
@@ -102,9 +135,18 @@ class SLatMeshDecoder(SparseTransformerBase):
             qk_rms_norm=qk_rms_norm,
         )
         self.resolution = resolution
-        self.rep_config = representation_config
-        self.mesh_extractor = SparseFeatures2Mesh(res=self.resolution*4, use_color=self.rep_config.get('use_color', False))
-        self.out_channels = self.mesh_extractor.feats_channels
+        self.rep_config = representation_config or {}
+        
+        # UDF extractor: converts sparse features to dense UDF grid
+        # Output resolution is resolution * 4 = 256 (after two 2x upsamples)
+        self.udf_extractor = SparseFeatures2UDF(
+            res=self.resolution * 4,
+            normalize_udf=self.rep_config.get('normalize_udf', True),
+        )
+        self.out_channels = self.udf_extractor.feats_channels  # 8 (UDF at 8 corners)
+        
+        # Upsampling blocks: 64³ → 128³ → 256³
+        # Same architecture as mesh decoder
         self.upsample = nn.ModuleList([
             SparseSubdivideBlock3d(
                 channels=model_channels,
@@ -117,6 +159,8 @@ class SLatMeshDecoder(SparseTransformerBase):
                 out_channels=model_channels // 8
             )
         ])
+        
+        # Output layer: predict UDF at 8 corners per voxel
         self.out_layer = sp.SparseLinear(model_channels // 8, self.out_channels)
 
         self.initialize_weights()
@@ -125,7 +169,7 @@ class SLatMeshDecoder(SparseTransformerBase):
 
     def initialize_weights(self) -> None:
         super().initialize_weights()
-        # Zero-out output layers:
+        # Zero-out output layers for stable training start
         nn.init.constant_(self.out_layer.weight, 0)
         nn.init.constant_(self.out_layer.bias, 0)
 
@@ -141,36 +185,54 @@ class SLatMeshDecoder(SparseTransformerBase):
         Convert the torso of the model to float32.
         """
         super().convert_to_fp32()
-        self.upsample.apply(convert_module_to_f32)  
+        self.upsample.apply(convert_module_to_f32)
     
-    def to_representation(self, x: sp.SparseTensor) -> List[MeshExtractResult]:
+    def to_representation(self, x: sp.SparseTensor) -> List[UDFExtractResult]:
         """
-        Convert a batch of network outputs to 3D representations.
+        Convert a batch of network outputs to UDF representations.
 
         Args:
             x: The [N x * x C] sparse tensor output by the network.
 
         Returns:
-            list of representations
+            list of UDFExtractResult, one per batch element
         """
         ret = []
         for i in range(x.shape[0]):
-            mesh = self.mesh_extractor(x[i], training=self.training)
-            ret.append(mesh)
+            udf_result = self.udf_extractor(x[i], training=self.training)
+            ret.append(udf_result)
         return ret
 
-    def forward(self, x: sp.SparseTensor) -> List[MeshExtractResult]:
+    def forward(self, x: sp.SparseTensor) -> List[UDFExtractResult]:
+        """
+        Forward pass: structured latents → UDF representations.
+        
+        Args:
+            x: SparseTensor with shape [batch, *, latent_channels]
+            
+        Returns:
+            List of UDFExtractResult, one per batch element
+        """
+        # Sparse transformer backbone
         h = super().forward(x)
+        
+        # Upsample: 64³ → 128³ → 256³
         for block in self.upsample:
             h = block(h)
+        
+        # Ensure dtype consistency
         h = h.type(x.dtype)
+        
+        # Predict UDF at 8 corners per voxel
         h = self.out_layer(h)
+        
+        # Convert to UDF representations
         return self.to_representation(h)
-    
 
-class ElasticSLatMeshDecoder(SparseTransformerElasticMixin, SLatMeshDecoder):
+
+class ElasticSLatUDFDecoder(SparseTransformerElasticMixin, SLatUDFDecoder):
     """
-    Slat VAE Mesh decoder with elastic memory management.
+    SLAT VAE UDF decoder with elastic memory management.
     Used for training with low VRAM.
     """
     pass

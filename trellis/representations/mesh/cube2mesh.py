@@ -103,20 +103,15 @@ class SparseFeatures2Mesh:
         Returns:
             return the success tag and ni you loss, 
         """
-        print(f'        [mesh_extractor] Starting mesh extraction...', flush=True)
         # add sdf bias to verts_attrs
         coords = cubefeats.coords[:, 1:]
         feats = cubefeats.feats
         
-        print(f'        [mesh_extractor] Getting layouts (sdf, deform, color, weights)...', flush=True)
         sdf, deform, color, weights = [self.get_layout(feats, name) for name in ['sdf', 'deform', 'color', 'weights']]
         sdf += self.sdf_bias
         v_attrs = [sdf, deform, color] if self.use_color else [sdf, deform]
-        print(f'        [mesh_extractor] Running sparse_cube2verts...', flush=True)
         v_pos, v_attrs, reg_loss = sparse_cube2verts(coords, torch.cat(v_attrs, dim=-1), training=training)
-        print(f'        [mesh_extractor] Getting dense attrs for vertices...', flush=True)
         v_attrs_d = get_dense_attrs(v_pos, v_attrs, res=self.res+1, sdf_init=True)
-        print(f'        [mesh_extractor] Getting dense attrs for weights...', flush=True)
         weights_d = get_dense_attrs(coords, weights, res=self.res, sdf_init=False)
         if self.use_color:
             sdf_d, deform_d, colors_d = v_attrs_d[..., 0], v_attrs_d[..., 1:4], v_attrs_d[..., 4:]
@@ -124,10 +119,8 @@ class SparseFeatures2Mesh:
             sdf_d, deform_d = v_attrs_d[..., 0], v_attrs_d[..., 1:4]
             colors_d = None
             
-        print(f'        [mesh_extractor] Getting deformed verts...', flush=True)
         x_nx3 = get_defomed_verts(self.reg_v, deform_d, self.res)
         
-        print(f'        [mesh_extractor] Running FlexiCubes mesh_extractor...', flush=True)
         vertices, faces, L_dev, colors = self.mesh_extractor(
             voxelgrid_vertices=x_nx3,
             scalar_field=sdf_d,
@@ -138,7 +131,6 @@ class SparseFeatures2Mesh:
             gamma_f=weights_d[:, 20],
             voxelgrid_colors=colors_d,
             training=training)
-        print(f'        [mesh_extractor] FlexiCubes done. Creating MeshExtractResult...', flush=True)
         
         mesh = MeshExtractResult(vertices=vertices, faces=faces, vertex_attrs=colors, res=self.res)
         if training:
@@ -148,5 +140,4 @@ class SparseFeatures2Mesh:
             mesh.reg_loss = reg_loss
             mesh.tsdf_v = get_defomed_verts(v_pos, v_attrs[:, 1:4], self.res)
             mesh.tsdf_s = v_attrs[:, 0]
-        print(f'        [mesh_extractor] Mesh extraction complete.', flush=True)
         return mesh

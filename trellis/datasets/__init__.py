@@ -7,6 +7,9 @@ __attributes = {
     'SLat2Render':'structured_latent2render',
     'Slat2RenderGeo':'structured_latent2render',
     
+    'SLat2UDF': 'slat2udf',
+    'SLat2RenderUDF': 'slat2udf',
+    
     'SparseStructureLatent': 'sparse_structure_latent',
     'TextConditionedSparseStructureLatent': 'sparse_structure_latent',
     'ImageConditionedSparseStructureLatent': 'sparse_structure_latent',
@@ -42,6 +45,11 @@ if __name__ == '__main__':
     from .structured_latent2render import (
         SLat2Render,
         Slat2RenderGeo,
+    )
+    
+    from .slat2udf import (
+        SLat2UDF,
+        SLat2RenderUDF,
     )
     
     from .sparse_structure_latent import (

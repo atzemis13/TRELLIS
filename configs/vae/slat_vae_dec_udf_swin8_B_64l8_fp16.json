@@ -1,7 +1,7 @@
 {
     "models": {
         "decoder": {
-            "name": "ElasticSLatMeshDecoder",
+            "name": "ElasticSLatUDFDecoder",
             "args": {
                 "resolution": 64,
                 "model_channels": 768,
@@ -13,22 +13,24 @@
                 "window_size": 8,
                 "use_fp16": true,
                 "representation_config": {
-                    "use_color": true
+                    "normalize_udf": true
                 }
             }
         }
     },
     "dataset": {
-        "name": "Slat2RenderGeo",
+        "name": "SLat2UDF",
         "args": {
-            "image_size": 512,
             "latent_model": "dinov2_vitl14_reg_slat_enc_swin8_B_64l8_fp16",
+            "num_surface_points": 10000,
             "min_aesthetic_score": 4.5,
-            "max_num_voxels": 32768
+            "max_num_voxels": 32768,
+            "normalize_udf": true,
+            "augment_points": true
         }
     },
     "trainer": {
-        "name": "SLatVaeMeshDecoderTrainer",
+        "name": "SLatVaeUDFDecoderTrainer",
         "args": {
             "max_steps": 1000000,
             "batch_size_per_gpu": 4,
@@ -62,12 +64,11 @@
             "i_log": 500,
             "i_sample": 10,
             "i_save": 10,
-            "lambda_ssim": 0.2,
-            "lambda_lpips": 0.2,
-            "lambda_tsdf": 0.01,
-            "lambda_depth": 10.0,
-            "lambda_color": 0.1,
-            "depth_loss_type": "smooth_l1"
+            "loss_type": "smooth_l1",
+            "lambda_reg": 0.1,
+            "lambda_edge_weight": 2.0,
+            "edge_threshold": 0.05,
+            "normalize_udf": true
         }
     }
 }

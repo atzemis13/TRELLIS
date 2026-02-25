@@ -91,6 +91,11 @@ if __name__ == '__main__':
         metadata['num_voxels'] = [0] * len(metadata)
     if 'cond_rendered' not in metadata.columns:
         metadata['cond_rendered'] = [False] * len(metadata)
+    # UDF-specific columns (for STEP files dataset)
+    if 'has_mesh' not in metadata.columns:
+        metadata['has_mesh'] = [False] * len(metadata)
+    if 'has_udf' not in metadata.columns:
+        metadata['has_udf'] = [False] * len(metadata)
     for model in image_models:
         if f'feature_{model}' not in metadata.columns:
             metadata[f'feature_{model}'] = [False] * len(metadata)
@@ -101,6 +106,21 @@ if __name__ == '__main__':
         if f'ss_latent_{model}' not in metadata.columns:
             metadata[f'ss_latent_{model}'] = [False] * len(metadata)
     
+    # merge step_processed (STEP files dataset)
+    df_files = [f for f in os.listdir(opt.output_dir) if f.startswith('step_processed_') and f.endswith('.csv')]
+    df_parts = []
+    for f in df_files:
+        try:
+            df_parts.append(pd.read_csv(os.path.join(opt.output_dir, f)))
+        except:
+            pass
+    if len(df_parts) > 0:
+        df = pd.concat(df_parts)
+        df.set_index('sha256', inplace=True)
+        metadata.update(df, overwrite=True)
+        for f in df_files:
+            shutil.move(os.path.join(opt.output_dir, f), os.path.join(opt.output_dir, 'merged_records', f'{timestamp}_{f}'))
+
     # merge rendered
     df_files = [f for f in os.listdir(opt.output_dir) if f.startswith('rendered_') and f.endswith('.csv')]
     df_parts = []
@@ -215,6 +235,13 @@ if __name__ == '__main__':
             tqdm(total=len(metadata), desc="Building metadata") as pbar:
             def worker(sha256):
                 try:
+                    # Check for STEP preprocessing (mesh + UDF)
+                    if need_process('has_mesh') and metadata.loc[sha256, 'has_mesh'] == False and \
+                        os.path.exists(os.path.join(opt.output_dir, 'meshes', f'{sha256}.obj')):
+                        metadata.loc[sha256, 'has_mesh'] = True
+                    if need_process('has_udf') and metadata.loc[sha256, 'has_udf'] == False and \
+                        os.path.exists(os.path.join(opt.output_dir, 'udf', f'{sha256}.npz')):
+                        metadata.loc[sha256, 'has_udf'] = True
                     if need_process('rendered') and metadata.loc[sha256, 'rendered'] == False and \
                         os.path.exists(os.path.join(opt.output_dir, 'renders', sha256, 'transforms.json')):
                         metadata.loc[sha256, 'rendered'] = True
@@ -264,6 +291,11 @@ if __name__ == '__main__':
         f.write('Statistics:\n')
         f.write(f'  - Number of assets: {len(metadata)}\n')
         f.write(f'  - Number of assets downloaded: {num_downloaded}\n')
+        # STEP-specific stats
+        if 'has_mesh' in metadata.columns:
+            f.write(f'  - Number of assets with mesh: {metadata["has_mesh"].sum()}\n')
+        if 'has_udf' in metadata.columns:
+            f.write(f'  - Number of assets with UDF: {metadata["has_udf"].sum()}\n')
         f.write(f'  - Number of assets rendered: {metadata["rendered"].sum()}\n')
         f.write(f'  - Number of assets voxelized: {metadata["voxelized"].sum()}\n')
         if len(image_models) != 0:
