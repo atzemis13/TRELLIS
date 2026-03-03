@@ -140,23 +140,28 @@ class SparseFeatures2UDF:
         
         # Convert sparse voxel UDF to dense vertex grid
         # sparse_cube2verts aggregates values from voxels sharing each vertex
+        # cubes_to_verts expects [N, 8, M] (3D), so keep the last dim
         v_pos, v_udf, reg_loss = sparse_cube2verts(
             coords, 
-            udf.squeeze(-1),  # [N, 8]
+            udf,  # [N, 8, 1]
             training=training
         )
         
         # Get dense UDF grid at vertices
         # v_pos: [M, 3] unique vertex positions
-        # v_udf: [M] UDF values at those vertices
+        # v_udf: [M, 1] UDF values at those vertices
         udf_dense = get_dense_attrs(
             v_pos, 
-            v_udf.unsqueeze(-1),  # [M, 1]
+            v_udf,  # [M, 1] — already has channel dim from sparse_cube2verts
             res=self.res + 1,
             sdf_init=False  # Don't initialize with SDF bias
-        )  # [res+1, res+1, res+1, 1]
+        )  # [(res+1)^3, 1] flattened
         
-        udf_grid = udf_dense.squeeze(-1)  # [res+1, res+1, res+1]
+        udf_grid = udf_dense.squeeze(-1)  # [(res+1)^3]
+        
+        # Reshape to 3D grid for spatial operations
+        res_v = self.res + 1
+        udf_grid = udf_grid.view(res_v, res_v, res_v)
         
         # For vertices not covered by any voxel, set UDF to max value
         # (they are far from the surface)

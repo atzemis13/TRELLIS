@@ -74,6 +74,11 @@ class SLatVaeUDFDecoderTrainer(BasicTrainer):
         self.lambda_edge_weight = lambda_edge_weight
         self.edge_threshold = edge_threshold
         self.normalize_udf = normalize_udf
+
+    @torch.no_grad()
+    def snapshot_dataset(self, num_samples=100):
+        """No-op: UDF dataset has no images to visualize."""
+        pass
         
     def _compute_udf_loss(
         self,
@@ -270,39 +275,14 @@ class SLatVaeUDFDecoderTrainer(BasicTrainer):
         all_gt_udf = torch.cat(all_gt_udf, dim=0)  # [N, P]
         all_surface_points = torch.cat(all_surface_points, dim=0)  # [N, P, 3]
         
-        # Compute overall metrics
-        pred_flat = all_pred_udf.flatten()
-        gt_flat = all_gt_udf.flatten()
-        
-        ret_dict['metrics'] = {
-            'mae': (pred_flat - gt_flat).abs().mean().item(),
-            'rmse': ((pred_flat - gt_flat) ** 2).mean().sqrt().item(),
-        }
-        
-        # Create visualizations
-        # 1. UDF error histogram
-        errors = (pred_flat - gt_flat).abs().cpu().numpy()
-        ret_dict['udf_error_histogram'] = {
-            'value': errors,
-            'type': 'histogram',
-            'bins': 50,
-            'range': (0, 0.5),
-        }
-        
-        # 2. Scatter plot of predicted vs ground truth (subsample for efficiency)
-        num_vis_points = min(10000, len(pred_flat))
-        indices = torch.randperm(len(pred_flat))[:num_vis_points]
-        ret_dict['udf_scatter'] = {
-            'pred': pred_flat[indices].cpu().numpy(),
-            'gt': gt_flat[indices].cpu().numpy(),
-            'type': 'scatter',
-        }
-        
-        # 3. Per-sample UDF grid slices (middle slice of first few samples)
-        num_grid_vis = min(4, num_samples)
-        reps = self.models['decoder'](args['latents'])
+        # Per-sample UDF grid slices (middle slice of each sample)
+        # Only return 'image' type entries — base snapshot() expects tensors
+        # with .contiguous() and saves them via save_image.
+        num_grid_vis = min(num_samples, len(all_pred_udf))
         grid_slices = []
-        for i in range(num_grid_vis):
+        # Run decoder on last batch to get grids
+        reps = self.models['decoder'](args['latents'])
+        for i in range(min(num_grid_vis, len(reps))):
             if reps[i].success:
                 udf_grid = reps[i].udf_grid
                 mid_z = udf_grid.shape[2] // 2
