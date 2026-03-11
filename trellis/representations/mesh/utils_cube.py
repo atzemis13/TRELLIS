@@ -47,9 +47,9 @@ def sparse_cube2verts(coords, feats, training=True):
     return new_coords, new_feats, con_loss
     
 
-def get_dense_attrs(coords : torch.Tensor, feats : torch.Tensor, res : int, sdf_init=True):
+def get_dense_attrs(coords : torch.Tensor, feats : torch.Tensor, res : int, sdf_init=True, init_val=0.0):
     F = feats.shape[-1]
-    dense_attrs = torch.zeros([res] * 3 + [F], device=feats.device)
+    dense_attrs = torch.full([res] * 3 + [F], init_val, device=feats.device, dtype=feats.dtype)
     if sdf_init:
         dense_attrs[..., 0] = 1 # initial outside sdf value
     dense_attrs[coords[:, 0], coords[:, 1], coords[:, 2], :] = feats

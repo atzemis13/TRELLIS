@@ -154,7 +154,8 @@ class SparseFeatures2UDF:
             v_pos, 
             v_udf,  # [M, 1] — already has channel dim from sparse_cube2verts
             res=self.res + 1,
-            sdf_init=False  # Don't initialize with SDF bias
+            sdf_init=False,  # Don't initialize with SDF bias
+            init_val=-1.0,   # Sentinel for unoccupied vertices (UDF is always >= 0)
         )  # [(res+1)^3, 1] flattened
         
         udf_grid = udf_dense.squeeze(-1)  # [(res+1)^3]
@@ -164,9 +165,9 @@ class SparseFeatures2UDF:
         udf_grid = udf_grid.view(res_v, res_v, res_v)
         
         # Track which vertices have valid (occupied) data
-        # get_dense_attrs initializes with zeros; softplus output is always > 0,
-        # so exactly-zero marks unoccupied vertices.
-        valid_mask = (udf_grid != 0)  # [res+1, res+1, res+1]
+        # get_dense_attrs initializes unoccupied vertices with -1;
+        # softplus output is always > 0, so any negative value is unoccupied.
+        valid_mask = (udf_grid >= 0)  # [res+1, res+1, res+1]
         
         # For vertices not covered by any voxel, set UDF to max value
         # (they are far from the surface)
