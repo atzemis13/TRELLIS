@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 from ...modules.sparse import SparseTensor
 from easydict import EasyDict as edict
-from .utils_cube import construct_dense_grid, sparse_cube2verts, get_dense_attrs
+from .utils_cube import sparse_cube2verts, get_dense_attrs
 
 
 class UDFExtractResult:
@@ -22,7 +22,6 @@ class UDFExtractResult:
     
     Attributes:
         udf_grid: [res+1, res+1, res+1] dense UDF values at grid vertices
-        grid_vertices: [(res+1)^3, 3] vertex positions in normalized coords
         res: grid resolution
         success: whether extraction succeeded
         reg_loss: regularization loss (training only)
@@ -30,11 +29,9 @@ class UDFExtractResult:
     def __init__(
         self,
         udf_grid: torch.Tensor,
-        grid_vertices: torch.Tensor,
         res: int = 256,
     ):
         self.udf_grid = udf_grid  # [res+1, res+1, res+1]
-        self.grid_vertices = grid_vertices  # [(res+1)^3, 3]
         self.res = res
         self.success = udf_grid is not None and udf_grid.numel() > 0
         
@@ -79,11 +76,6 @@ class SparseFeatures2UDF:
         
         # Voxel size for normalization (grid spans [-0.5, 0.5])
         self.voxel_size = 1.0 / res
-        
-        # Construct the dense vertex grid (same as FlexiCubes)
-        verts, cube = construct_dense_grid(self.res, self.device)
-        self.reg_v = verts.to(self.device)  # [(res+1)^3, 3]
-        self.reg_c = cube.to(self.device)   # [res^3, 8]
         
         self._calc_layout()
     
@@ -179,7 +171,6 @@ class SparseFeatures2UDF:
         
         result = UDFExtractResult(
             udf_grid=udf_grid,
-            grid_vertices=self.reg_v,
             res=self.res,
         )
         
