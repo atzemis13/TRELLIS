@@ -163,12 +163,17 @@ class SparseFeatures2UDF:
         res_v = self.res + 1
         udf_grid = udf_grid.view(res_v, res_v, res_v)
         
+        # Track which vertices have valid (occupied) data
+        # get_dense_attrs initializes with zeros; softplus output is always > 0,
+        # so exactly-zero marks unoccupied vertices.
+        valid_mask = (udf_grid != 0)  # [res+1, res+1, res+1]
+        
         # For vertices not covered by any voxel, set UDF to max value
         # (they are far from the surface)
         udf_grid = torch.where(
-            udf_grid == 0,
+            valid_mask,
+            udf_grid,
             torch.ones_like(udf_grid) * (self.res * self.voxel_size),  # Max possible UDF
-            udf_grid
         )
         
         result = UDFExtractResult(
@@ -179,11 +184,20 @@ class SparseFeatures2UDF:
         
         if training:
             # Smoothness regularization: penalize large UDF gradients
-            # This encourages smooth UDF fields
+            # Only consider pairs where BOTH neighbors have valid (occupied) data,
+            # otherwise the huge gradient at the sparse/dense boundary dominates.
+            valid_x = valid_mask[1:, :, :] & valid_mask[:-1, :, :]
+            valid_y = valid_mask[:, 1:, :] & valid_mask[:, :-1, :]
+            valid_z = valid_mask[:, :, 1:] & valid_mask[:, :, :-1]
+            
             grad_x = (udf_grid[1:, :, :] - udf_grid[:-1, :, :]).abs()
             grad_y = (udf_grid[:, 1:, :] - udf_grid[:, :-1, :]).abs()
             grad_z = (udf_grid[:, :, 1:] - udf_grid[:, :, :-1]).abs()
-            smoothness_loss = (grad_x.mean() + grad_y.mean() + grad_z.mean()) / 3.0
+            
+            smoothness_x = (grad_x * valid_x).sum() / (valid_x.sum() + 1e-8)
+            smoothness_y = (grad_y * valid_y).sum() / (valid_y.sum() + 1e-8)
+            smoothness_z = (grad_z * valid_z).sum() / (valid_z.sum() + 1e-8)
+            smoothness_loss = (smoothness_x + smoothness_y + smoothness_z) / 3.0
             
             # Combine with vertex aggregation reg loss
             result.reg_loss = reg_loss + 0.01 * smoothness_loss
