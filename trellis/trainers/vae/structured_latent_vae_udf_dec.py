@@ -55,7 +55,6 @@ class SLatVaeUDFDecoderTrainer(BasicTrainer):
         lambda_reg (float): Regularization loss weight.
         lambda_edge_weight (float): Weight multiplier for points near edges.
         edge_threshold (float): UDF threshold for "near edge" classification.
-        normalize_udf (bool): Whether UDF values are normalized by voxel size.
     """
     
     def __init__(
@@ -65,7 +64,6 @@ class SLatVaeUDFDecoderTrainer(BasicTrainer):
         lambda_reg: float = 0.1,
         lambda_edge_weight: float = 2.0,
         edge_threshold: float = 0.05,
-        normalize_udf: bool = True,
         **kwargs
     ):
         super().__init__(*args, **kwargs)
@@ -73,7 +71,6 @@ class SLatVaeUDFDecoderTrainer(BasicTrainer):
         self.lambda_reg = lambda_reg
         self.lambda_edge_weight = lambda_edge_weight
         self.edge_threshold = edge_threshold
-        self.normalize_udf = normalize_udf
 
     @torch.no_grad()
     def snapshot_dataset(self, num_samples=100):

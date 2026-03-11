@@ -34,7 +34,6 @@ class SLat2UDF(StandardDatasetBase):
         num_surface_points: number of surface points to sample per instance
         min_aesthetic_score: minimum aesthetic score filter
         max_num_voxels: maximum number of voxels filter
-        normalize_udf: whether UDF values are normalized by voxel size
         augment_points: whether to randomly subsample points each iteration
     """
     def __init__(
@@ -44,19 +43,13 @@ class SLat2UDF(StandardDatasetBase):
         num_surface_points: int = 10000,
         min_aesthetic_score: float = 5.0,
         max_num_voxels: int = 32768,
-        normalize_udf: bool = True,
         augment_points: bool = True,
     ):
         self.latent_model = latent_model
         self.num_surface_points = num_surface_points
         self.min_aesthetic_score = min_aesthetic_score
         self.max_num_voxels = max_num_voxels
-        self.normalize_udf = normalize_udf
         self.augment_points = augment_points
-        
-        # Grid resolution for normalization (should match decoder)
-        self.grid_res = 256
-        self.voxel_size = 1.0 / self.grid_res
         
         super().__init__(roots)
         
@@ -101,10 +94,8 @@ class SLat2UDF(StandardDatasetBase):
         
         Expected npz format:
         - points: [P, 3] surface point positions in normalized coords [-0.5, 0.5]^3
-        - udf: [P] unsigned distance to nearest BREP edge
-        
-        If normalize_udf is True, UDF values should be pre-normalized by voxel size
-        (i.e., UDF=1.0 means one voxel width away from edge).
+        - udf: [P] unsigned distance to nearest BREP edge, pre-normalized by
+          voxel size in the data prep pipeline (UDF=1.0 means one voxel width).
         """
         data = np.load(os.path.join(root, 'udf', f'{instance}.npz'))
         points = torch.tensor(data['points']).float()  # [P, 3]
@@ -171,7 +162,6 @@ class SLat2UDF(StandardDatasetBase):
     def __str__(self):
         lines = [super().__str__()]
         lines.append(f'  - Num surface points: {self.num_surface_points}')
-        lines.append(f'  - Normalize UDF: {self.normalize_udf}')
         lines.append(f'  - Augment points: {self.augment_points}')
         return '\n'.join(lines)
 

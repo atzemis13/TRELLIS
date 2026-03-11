@@ -12,9 +12,7 @@
                 "attn_mode": "swin",
                 "window_size": 8,
                 "use_fp16": true,
-                "representation_config": {
-                    "normalize_udf": true
-                }
+                "representation_config": {}
             }
         }
     },
@@ -25,7 +23,6 @@
             "num_surface_points": 10000,
             "min_aesthetic_score": 4.5,
             "max_num_voxels": 32768,
-            "normalize_udf": true,
             "augment_points": true
         }
     },
@@ -67,8 +64,7 @@
             "loss_type": "smooth_l1",
             "lambda_reg": 0.1,
             "lambda_edge_weight": 2.0,
-            "edge_threshold": 0.05,
-            "normalize_udf": true
+            "edge_threshold": 0.05
         }
     }
 }

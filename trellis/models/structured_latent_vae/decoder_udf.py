@@ -141,7 +141,6 @@ class SLatUDFDecoder(SparseTransformerBase):
         # Output resolution is resolution * 4 = 256 (after two 2x upsamples)
         self.udf_extractor = SparseFeatures2UDF(
             res=self.resolution * 4,
-            normalize_udf=self.rep_config.get('normalize_udf', True),
         )
         self.out_channels = self.udf_extractor.feats_channels  # 8 (UDF at 8 corners)
         

@@ -61,18 +61,15 @@ class SparseFeatures2UDF:
     Args:
         device: torch device
         res: grid resolution (default 256 to match mesh decoder output)
-        normalize_udf: if True, normalize UDF by voxel size for scale invariance
     """
     def __init__(
         self, 
         device: str = "cuda", 
         res: int = 256,
-        normalize_udf: bool = True,
     ):
         super().__init__()
         self.device = device
         self.res = res
-        self.normalize_udf = normalize_udf
         
         # Voxel size for normalization (grid spans [-0.5, 0.5])
         self.voxel_size = 1.0 / res
@@ -122,13 +119,9 @@ class SparseFeatures2UDF:
         
         # UDF should be non-negative (unsigned distance)
         # Use softplus for smooth, non-negative output
+        # Note: UDF normalization (e.g. dividing by voxel_size) is handled
+        # in the data prep pipeline, not here.
         udf = F.softplus(udf)
-        
-        # Optionally normalize by voxel size
-        if self.normalize_udf:
-            # UDF is in units of voxel size, making it scale-invariant
-            # At inference, multiply by voxel_size to get actual distance
-            pass  # Keep as-is, normalization happens at data prep
         
         # Convert sparse voxel UDF to dense vertex grid
         # sparse_cube2verts aggregates values from voxels sharing each vertex
