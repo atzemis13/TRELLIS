@@ -177,6 +177,11 @@ def compute_geodesic_udf(mesh, edges):
     solver = pp3d.MeshHeatMethodDistanceSolver(mesh.vertices, mesh.faces)
     dist_to_edge = solver.compute_distance_multisource(source_verts)
     
+    # Clamp to >= 0: the heat method can produce small negative artifacts
+    # at/near source vertices (Poisson solve numerical error). True distance
+    # at those vertices is exactly 0.
+    dist_to_edge = np.maximum(dist_to_edge, 0.0)
+    
     return dist_to_edge.astype(np.float32)
 
 
@@ -218,7 +223,7 @@ def sample_surface_with_udf(mesh, vertex_udf, n_samples):
     return points.astype(np.float32), udf.astype(np.float32)
 
 
-def _process_step(file_path, sha256, output_dir, num_samples, density):
+def _process_step(file_path, sha256, output_dir, num_samples, density, resolution=256):
     """Process a single STEP file."""
     import trimesh
     
@@ -255,9 +260,8 @@ def _process_step(file_path, sha256, output_dir, num_samples, density):
         # Compute geodesic UDF on vertices
         vertex_udf = compute_geodesic_udf(normalized_mesh, edges)
         
-        # Normalize UDF by voxel size (1/256)
-        # So UDF=1.0 means "one voxel width away from edge"
-        voxel_size = 1.0 / 256
+        # Normalize UDF by voxel size so UDF=1.0 means "one voxel width away from edge"
+        voxel_size = 1.0 / resolution
         normalized_udf = vertex_udf / voxel_size
         
         # Sample surface points with UDF
@@ -300,6 +304,8 @@ if __name__ == '__main__':
                         help='Number of surface points to sample for UDF')
     parser.add_argument('--density', type=float, default=100.0,
                         help='Mesh density (edges per diagonal)')
+    parser.add_argument('--resolution', type=int, default=256,
+                        help='Voxel grid resolution for UDF normalization (default: 256)')
     parser.add_argument('--instances', type=str, default=None,
                         help='Specific instances to process (comma-separated or file)')
     dataset_utils.add_args(parser)
@@ -373,6 +379,7 @@ if __name__ == '__main__':
                 output_dir=opt.output_dir,
                 num_samples=opt.num_samples,
                 density=opt.density,
+                resolution=opt.resolution,
             )
             if record is not None:
                 processed_records.append(record)
