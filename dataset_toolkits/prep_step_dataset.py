@@ -185,23 +185,58 @@ def compute_geodesic_udf(mesh, edges):
     return dist_to_edge.astype(np.float32)
 
 
-def sample_surface_with_udf(mesh, vertex_udf, n_samples):
+def sample_surface_with_udf(mesh, vertex_udf, n_samples, edge_bias=0.5, edge_threshold=2.0):
     """
     Sample random points on mesh surface with interpolated UDF values.
     
+    Uses edge-biased sampling: a fraction of points are preferentially sampled
+    from triangles near BREP edges (low UDF), giving denser supervision in the
+    critical near-edge region.
+    
     Args:
         mesh: trimesh.Trimesh
-        vertex_udf: per-vertex UDF values
-        n_samples: number of points to sample
+        vertex_udf: per-vertex UDF values (normalized by voxel size)
+        n_samples: total number of points to sample
+        edge_bias: fraction of samples drawn from near-edge triangles (0-1)
+        edge_threshold: UDF threshold for "near-edge" (in voxel widths).
+            Triangles where the mean vertex UDF < this are considered near-edge.
         
     Returns:
         points: [N, 3] surface points
         udf: [N] UDF values at those points
     """
-    # Sample triangles by area
     areas = mesh.area_faces
-    probs = areas / areas.sum()
-    tri_indices = np.random.choice(len(mesh.faces), size=n_samples, p=probs)
+    
+    # Compute per-face mean UDF (average of 3 corner UDF values)
+    face_mean_udf = vertex_udf[mesh.faces].mean(axis=1)  # [F]
+    
+    # Split into near-edge and uniform sampling
+    near_edge_mask = face_mean_udf < edge_threshold
+    n_near_edge = near_edge_mask.sum()
+    
+    if n_near_edge > 0 and edge_bias > 0:
+        n_edge_samples = int(n_samples * edge_bias)
+        n_uniform_samples = n_samples - n_edge_samples
+        
+        # Near-edge sampling: area-weighted among near-edge faces only
+        edge_areas = areas.copy()
+        edge_areas[~near_edge_mask] = 0
+        edge_probs = edge_areas / edge_areas.sum()
+        edge_tri_indices = np.random.choice(len(mesh.faces), size=n_edge_samples, p=edge_probs)
+        
+        # Uniform sampling: area-weighted over ALL faces
+        uniform_probs = areas / areas.sum()
+        uniform_tri_indices = np.random.choice(len(mesh.faces), size=n_uniform_samples, p=uniform_probs)
+        
+        tri_indices = np.concatenate([edge_tri_indices, uniform_tri_indices])
+        print(f"  Edge-biased sampling: {n_near_edge}/{len(mesh.faces)} near-edge faces "
+              f"({n_edge_samples} edge + {n_uniform_samples} uniform = {n_samples} total)")
+    else:
+        # Fallback: pure area-weighted uniform sampling
+        probs = areas / areas.sum()
+        tri_indices = np.random.choice(len(mesh.faces), size=n_samples, p=probs)
+        if n_near_edge == 0:
+            print(f"  Warning: No near-edge faces (threshold={edge_threshold}), using uniform sampling")
     
     # Sample barycentric coordinates
     u = np.random.uniform(0, 1, n_samples)
@@ -220,10 +255,13 @@ def sample_surface_with_udf(mesh, vertex_udf, n_samples):
     corner_udf = vertex_udf[mesh.faces[tri_indices]]  # [N, 3]
     udf = np.einsum('ij,ij->i', corner_udf, barycentrics)  # [N]
     
-    return points.astype(np.float32), udf.astype(np.float32)
+    # Shuffle so edge/uniform samples are interleaved
+    perm = np.random.permutation(n_samples)
+    
+    return points[perm].astype(np.float32), udf[perm].astype(np.float32)
 
 
-def _process_step(file_path, sha256, output_dir, num_samples, density, resolution=256):
+def _process_step(file_path, sha256, output_dir, num_samples, density, resolution=256, edge_bias=0.5, edge_threshold=2.0):
     """Process a single STEP file."""
     import trimesh
     
@@ -265,7 +303,8 @@ def _process_step(file_path, sha256, output_dir, num_samples, density, resolutio
         normalized_udf = vertex_udf / voxel_size
         
         # Sample surface points with UDF
-        points, udf = sample_surface_with_udf(normalized_mesh, normalized_udf, num_samples)
+        points, udf = sample_surface_with_udf(normalized_mesh, normalized_udf, num_samples,
+                                               edge_bias=edge_bias, edge_threshold=edge_threshold)
         
         # Save UDF data
         np.savez(
@@ -300,12 +339,16 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--output_dir', type=str, required=True,
                         help='Directory to save processed data')
-    parser.add_argument('--num_samples', type=int, default=50000,
+    parser.add_argument('--num_samples', type=int, default=100000,
                         help='Number of surface points to sample for UDF')
     parser.add_argument('--density', type=float, default=100.0,
                         help='Mesh density (edges per diagonal)')
     parser.add_argument('--resolution', type=int, default=256,
                         help='Voxel grid resolution for UDF normalization (default: 256)')
+    parser.add_argument('--edge_bias', type=float, default=0.5,
+                        help='Fraction of samples biased toward near-edge triangles (0=uniform, 1=all edge)')
+    parser.add_argument('--edge_threshold', type=float, default=2.0,
+                        help='UDF threshold (in voxel widths) for near-edge triangles')
     parser.add_argument('--instances', type=str, default=None,
                         help='Specific instances to process (comma-separated or file)')
     dataset_utils.add_args(parser)
@@ -380,6 +423,8 @@ if __name__ == '__main__':
                 num_samples=opt.num_samples,
                 density=opt.density,
                 resolution=opt.resolution,
+                edge_bias=opt.edge_bias,
+                edge_threshold=opt.edge_threshold,
             )
             if record is not None:
                 processed_records.append(record)
