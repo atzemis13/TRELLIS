@@ -228,74 +228,237 @@ class SLatVaeUDFDecoderTrainer(BasicTrainer):
     def run_snapshot(
         self,
         num_samples: int,
-        batch_size: int,
+        batch_size: int = 1,
         verbose: bool = False,
+        **kwargs,
     ) -> Dict:
         """
-        Run inference on a few samples for visualization.
-        
-        Returns:
-            Dictionary with visualization data
+        Run inference on samples and produce UDF visualizations.
+
+        Generates per-sample comparison images with:
+          - GT UDF scatter (XY + XZ projections)
+          - Predicted UDF scatter (same views)
+          - Absolute error scatter (same views)
+          - Summary metrics in the figure title
+
+        Also generates a GT-vs-predicted UDF distribution histogram.
         """
         dataloader = DataLoader(
             copy.deepcopy(self.dataset),
             batch_size=batch_size,
-            shuffle=True,
+            shuffle=False,
             num_workers=0,
             collate_fn=self.dataset.collate_fn if hasattr(self.dataset, 'collate_fn') else None,
         )
-        
-        ret_dict = {}
-        
-        # Collect samples
-        all_pred_udf = []
-        all_gt_udf = []
-        all_surface_points = []
-        
-        for i in range(0, num_samples, batch_size):
-            batch = min(batch_size, num_samples - i)
-            data = next(iter(dataloader))
+
+        comparison_images = []
+        all_gt_flat: List[np.ndarray] = []
+        all_pred_flat: List[np.ndarray] = []
+
+        samples_collected = 0
+        for data in dataloader:
+            if samples_collected >= num_samples:
+                break
+
             args = recursive_to_device(data, 'cuda')
-            
-            # Forward pass
             reps = self.models['decoder'](args['latents'])
-            
-            # Sample UDF at surface points
             pred_udf = self._sample_udf_at_points(reps, args['surface_points'])
-            
-            all_pred_udf.append(pred_udf[:batch])
-            all_gt_udf.append(args['surface_udf'][:batch])
-            all_surface_points.append(args['surface_points'][:batch])
-        
-        # Concatenate
-        all_pred_udf = torch.cat(all_pred_udf, dim=0)  # [N, P]
-        all_gt_udf = torch.cat(all_gt_udf, dim=0)  # [N, P]
-        all_surface_points = torch.cat(all_surface_points, dim=0)  # [N, P, 3]
-        
-        # Per-sample UDF grid slices (middle slice of each sample)
-        # Only return 'image' type entries — base snapshot() expects tensors
-        # with .contiguous() and saves them via save_image.
-        num_grid_vis = min(num_samples, len(all_pred_udf))
-        grid_slices = []
-        # Run decoder on last batch to get grids
-        reps = self.models['decoder'](args['latents'])
-        for i in range(min(num_grid_vis, len(reps))):
-            if reps[i].success:
-                udf_grid = reps[i].udf_grid
-                mid_z = udf_grid.shape[2] // 2
-                slice_img = udf_grid[:, :, mid_z].cpu()
-                # Normalize to [0, 1] for visualization
-                slice_img = slice_img / (slice_img.max() + 1e-8)
-                grid_slices.append(slice_img)
-        
-        if grid_slices:
-            grid_slices = torch.stack(grid_slices)  # [N, H, W]
-            ret_dict['udf_grid_slices'] = {
-                'value': grid_slices.unsqueeze(1).repeat(1, 3, 1, 1),  # [N, 3, H, W]
+
+            actual_batch = min(len(reps), num_samples - samples_collected)
+            for j in range(actual_batch):
+                if not reps[j].success:
+                    continue
+
+                pts = args['surface_points'][j].cpu().numpy()
+                gt = args['surface_udf'][j].cpu().numpy()
+                pred = pred_udf[j].cpu().numpy()
+
+                comparison_images.append(
+                    self._render_udf_comparison(pts, gt, pred)
+                )
+                all_gt_flat.append(gt)
+                all_pred_flat.append(pred)
+
+            samples_collected += actual_batch
+
+        ret_dict: Dict = {}
+
+        if comparison_images:
+            ret_dict['udf_comparison'] = {
+                'value': torch.stack(comparison_images),
                 'type': 'image',
             }
-        
+
+        if all_gt_flat:
+            gt_all = np.concatenate(all_gt_flat)
+            pred_all = np.concatenate(all_pred_flat)
+            ret_dict['udf_pred_vs_gt'] = {
+                'value': self._render_pred_vs_gt_scatter(gt_all, pred_all).unsqueeze(0),
+                'type': 'image',
+            }
+
         return ret_dict
+
+    # ------------------------------------------------------------------
+    # Visualization helpers
+    # ------------------------------------------------------------------
+
+    def _render_udf_comparison(
+        self,
+        points: np.ndarray,
+        gt_values: np.ndarray,
+        pred_values: np.ndarray,
+    ) -> torch.Tensor:
+        """
+        Render a 3-row × 2-column comparison figure for one sample.
+
+        Rows: GT UDF, Predicted UDF, Absolute Error.
+        Columns: XY (top-down) and XZ (front) projections.
+
+        Returns:
+            [3, H, W] image tensor in [0, 1].
+        """
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+
+        error = np.abs(pred_values - gt_values)
+
+        # Adaptive colour ranges (95-th percentile, with sane minimums)
+        udf_vmax = max(float(np.percentile(gt_values, 95)),
+                       float(np.percentile(pred_values, 95)), 0.5)
+        err_vmax = max(float(np.percentile(error, 95)), 0.05)
+
+        fig, axes = plt.subplots(3, 2, figsize=(9, 12), dpi=100,
+                                 layout='constrained')
+        scatter_kw = dict(s=0.5, rasterized=True)
+
+        rows = [
+            ('GT UDF',    gt_values,   'viridis', 0, udf_vmax),
+            ('Pred UDF',  pred_values, 'viridis', 0, udf_vmax),
+            ('Error |Δ|', error,       'Reds',    0, err_vmax),
+        ]
+
+        for row_idx, (label, vals, cmap, vmin, vmax) in enumerate(rows):
+            # XY projection — sort by Z for depth ordering
+            order = np.argsort(points[:, 2])
+            axes[row_idx, 0].scatter(
+                points[order, 0], points[order, 1],
+                c=vals[order], cmap=cmap, vmin=vmin, vmax=vmax, **scatter_kw)
+            axes[row_idx, 0].set_xlim(-0.55, 0.55)
+            axes[row_idx, 0].set_ylim(-0.55, 0.55)
+            axes[row_idx, 0].set_aspect('equal')
+            axes[row_idx, 0].set_title(f'{label} — XY')
+            axes[row_idx, 0].set_xlabel('X')
+            axes[row_idx, 0].set_ylabel('Y')
+
+            # XZ projection — sort by Y for depth ordering
+            order = np.argsort(points[:, 1])
+            sc = axes[row_idx, 1].scatter(
+                points[order, 0], points[order, 2],
+                c=vals[order], cmap=cmap, vmin=vmin, vmax=vmax, **scatter_kw)
+            axes[row_idx, 1].set_xlim(-0.55, 0.55)
+            axes[row_idx, 1].set_ylim(-0.55, 0.55)
+            axes[row_idx, 1].set_aspect('equal')
+            axes[row_idx, 1].set_title(f'{label} — XZ')
+            axes[row_idx, 1].set_xlabel('X')
+            axes[row_idx, 1].set_ylabel('Z')
+
+            fig.colorbar(sc, ax=axes[row_idx, :].tolist(), shrink=0.8, pad=0.02)
+
+        # Summary metrics in the super-title
+        mae = float(error.mean())
+        rmse = float(np.sqrt((error ** 2).mean()))
+        acc_005 = float((error < 0.05).mean() * 100)
+        acc_01 = float((error < 0.1).mean() * 100)
+        fig.suptitle(
+            f'MAE: {mae:.4f}  |  RMSE: {rmse:.4f}  |  '
+            f'Acc@0.05: {acc_005:.1f}%  |  Acc@0.1: {acc_01:.1f}%',
+            fontsize=11)
+
+        return self._fig_to_tensor(fig)
+
+    def _render_pred_vs_gt_scatter(
+        self,
+        gt_values: np.ndarray,
+        pred_values: np.ndarray,
+    ) -> torch.Tensor:
+        """
+        Render pred-vs-GT scatter plots (full range + zoomed near-edge).
+
+        Left:  full range with identity line and metrics.
+        Right: zoomed to GT < 2.0 (near-edge region).
+
+        Returns:
+            [3, H, W] image tensor in [0, 1].
+        """
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+
+        error = np.abs(pred_values - gt_values)
+        max_val = max(float(gt_values.max()), float(pred_values.max())) * 1.05
+        max_val = max(max_val, 0.5)
+
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5), dpi=100)
+
+        # --- Left: full range ---
+        ax = axes[0]
+        ax.scatter(gt_values, pred_values, s=1, alpha=0.3, c='steelblue', rasterized=True)
+        ax.plot([0, max_val], [0, max_val], 'r--', linewidth=1, label='Perfect')
+        ax.set_xlabel('GT UDF')
+        ax.set_ylabel('Pred UDF')
+        ax.set_title('Pred vs GT (all points)')
+        ax.set_xlim(0, max_val)
+        ax.set_ylim(0, max_val)
+        ax.set_aspect('equal')
+        ax.legend(fontsize=9)
+        mae = float(error.mean())
+        rmse = float(np.sqrt((error ** 2).mean()))
+        acc_01 = float((error < 0.1).mean())
+        acc_005 = float((error < 0.05).mean())
+        ax.text(0.05, 0.95,
+                f'MAE: {mae:.4f}\nRMSE: {rmse:.4f}\nacc@0.1: {acc_01:.1%}\nacc@0.05: {acc_005:.1%}',
+                transform=ax.transAxes, verticalalignment='top', fontsize=9,
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+        # --- Right: near-edge zoom (GT < 2.0) ---
+        ax = axes[1]
+        mask = gt_values < 2.0
+        if mask.sum() > 0:
+            ax.scatter(gt_values[mask], pred_values[mask], s=2, alpha=0.3,
+                       c='steelblue', rasterized=True)
+            ax.plot([0, 2.0], [0, 2.0], 'r--', linewidth=1, label='Perfect')
+            ne_err = error[mask]
+            ne_mae = float(ne_err.mean())
+            ne_acc = float((ne_err < 0.1).mean())
+            ax.text(0.05, 0.95,
+                    f'Near-edge MAE: {ne_mae:.4f}\nNear-edge acc@0.1: {ne_acc:.1%}',
+                    transform=ax.transAxes, verticalalignment='top', fontsize=9,
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        ax.set_xlabel('GT UDF')
+        ax.set_ylabel('Pred UDF')
+        ax.set_title('Near-Edge Region (GT < 2.0)')
+        ax.set_xlim(0, 2.0)
+        ax.set_ylim(0, 2.0)
+        ax.set_aspect('equal')
+        ax.legend(fontsize=9)
+
+        fig.tight_layout()
+        return self._fig_to_tensor(fig)
+
+    @staticmethod
+    def _fig_to_tensor(fig) -> torch.Tensor:
+        """Convert a matplotlib figure to a [3, H, W] float tensor in [0, 1]."""
+        import matplotlib.pyplot as plt
+
+        fig.canvas.draw()
+        w, h = fig.canvas.get_width_height()
+        # buffer_rgba() works on all modern matplotlib versions
+        buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
+        buf = buf.reshape(h, w, 4)[:, :, :3].copy()  # drop alpha
+        plt.close(fig)
+        return torch.from_numpy(buf).float().div_(255.0).permute(2, 0, 1)
     
     @torch.no_grad()
     def evaluate(
