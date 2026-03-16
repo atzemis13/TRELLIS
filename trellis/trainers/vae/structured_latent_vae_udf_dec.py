@@ -246,7 +246,7 @@ class SLatVaeUDFDecoderTrainer(BasicTrainer):
         dataloader = DataLoader(
             copy.deepcopy(self.dataset),
             batch_size=batch_size,
-            shuffle=False,
+            shuffle=True,
             num_workers=0,
             collate_fn=self.dataset.collate_fn if hasattr(self.dataset, 'collate_fn') else None,
         )
