@@ -514,37 +514,90 @@ if __name__ == '__main__':
             if record is not None:
                 processed_records.append(record)
     else:
-        # Multiprocess: each worker gets its own gmsh instance
-        pool = Pool(processes=n_workers, initializer=_worker_init)
+        # Multiprocess: each worker gets its own gmsh instance.
+        # We use a fresh Pool for each batch of work items so that
+        # timed-out workers (stuck in gmsh infinite loops) get killed
+        # and replaced rather than permanently consuming a pool slot.
+        from multiprocessing import Process, Queue as MPQueue
+        
+        result_queue = MPQueue()
+        active = {}  # pid -> (Process, sha256, start_time)
+        pending = list(enumerate(work_items))
+        pending.reverse()  # pop from end
+        
+        import time
+        pbar = tqdm(total=len(work_items), desc='Processing STEP files')
+        
+        def _queue_worker(item, result_queue):
+            """Worker that puts result into a queue."""
+            try:
+                record = _worker_fn(item)
+                result_queue.put(('ok', item['sha256'], record))
+            except Exception as e:
+                result_queue.put(('error', item['sha256'], str(e)))
+        
         try:
-            async_results = []
-            for item in work_items:
-                ar = pool.apply_async(_worker_fn, (item,))
-                async_results.append((item['sha256'], ar))
-            
-            for sha256, ar in tqdm(async_results, desc='Processing STEP files'):
-                try:
-                    record = ar.get(timeout=timeout)
-                    if record is not None:
-                        processed_records.append(record)
-                except KeyboardInterrupt:
-                    print('\nInterrupted by user. Saving progress...')
-                    pool.terminate()
-                    break
-                except Exception as e:
-                    if 'TimeoutError' in type(e).__name__ or isinstance(e, TimeoutError):
-                        print(f'  TIMEOUT: {sha256} exceeded {timeout}s — skipping')
+            while pending or active:
+                # Launch workers up to n_workers
+                while pending and len(active) < n_workers:
+                    idx, item = pending.pop()
+                    p = Process(target=_queue_worker, args=(item, result_queue))
+                    p.start()
+                    active[p.pid] = (p, item['sha256'], time.time())
+                
+                # Check for completed results (non-blocking)
+                while not result_queue.empty():
+                    try:
+                        status, sha256, data = result_queue.get_nowait()
+                        if status == 'ok' and data is not None:
+                            processed_records.append(data)
+                        elif status == 'error':
+                            print(f'  ERROR: {sha256}: {data}')
+                            n_error += 1
+                    except:
+                        break
+                
+                # Check for timeouts and finished processes
+                now = time.time()
+                finished_pids = []
+                for pid, (proc, sha256, start) in active.items():
+                    if not proc.is_alive():
+                        proc.join(timeout=1)
+                        finished_pids.append(pid)
+                        pbar.update(1)
+                    elif timeout and (now - start) > timeout:
+                        print(f'  TIMEOUT: {sha256} exceeded {timeout}s — killing')
+                        proc.kill()
+                        proc.join(timeout=5)
                         n_timeout += 1
-                    else:
-                        print(f'  ERROR: {sha256}: {e}')
-                        n_error += 1
-            
-            pool.close()
-            pool.join()
+                        finished_pids.append(pid)
+                        pbar.update(1)
+                
+                for pid in finished_pids:
+                    del active[pid]
+                
+                # Brief sleep to avoid busy-waiting
+                if active:
+                    time.sleep(0.5)
+        
         except KeyboardInterrupt:
-            print('\nInterrupted. Terminating workers...')
-            pool.terminate()
-            pool.join()
+            print('\nInterrupted by user. Killing workers...')
+            for pid, (proc, sha256, start) in active.items():
+                proc.kill()
+                proc.join(timeout=5)
+        
+        # Drain remaining results from queue
+        while not result_queue.empty():
+            try:
+                status, sha256, data = result_queue.get_nowait()
+                if status == 'ok' and data is not None:
+                    processed_records.append(data)
+                elif status == 'error':
+                    n_error += 1
+            except:
+                break
+        
+        pbar.close()
 
     # Combine and save records
     processed = pd.DataFrame.from_records(processed_records + records)
