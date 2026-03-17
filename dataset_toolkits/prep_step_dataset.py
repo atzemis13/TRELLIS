@@ -17,10 +17,12 @@ import sys
 import importlib
 import argparse
 import copy
+import signal
 import numpy as np
 import pandas as pd
 from easydict import EasyDict as edict
 from functools import partial
+from multiprocessing import Pool
 from tqdm import tqdm
 
 # Add parent to path for udf_sample imports
@@ -333,6 +335,28 @@ def _process_step(file_path, sha256, output_dir, num_samples, density, resolutio
         return None
 
 
+def _worker_init():
+    """Initializer for each worker process — ignore SIGINT so the parent handles Ctrl+C."""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+
+def _worker_fn(args):
+    """
+    Top-level worker function for multiprocessing (must be picklable).
+    Receives a single dict with all arguments.
+    """
+    return _process_step(
+        file_path=args['file_path'],
+        sha256=args['sha256'],
+        output_dir=args['output_dir'],
+        num_samples=args['num_samples'],
+        density=args['density'],
+        resolution=args['resolution'],
+        edge_bias=args['edge_bias'],
+        edge_threshold=args['edge_threshold'],
+    )
+
+
 if __name__ == '__main__':
     dataset_utils = importlib.import_module(f'datasets.{sys.argv[1]}')
 
@@ -351,11 +375,14 @@ if __name__ == '__main__':
                         help='UDF threshold (in voxel widths) for near-edge triangles')
     parser.add_argument('--instances', type=str, default=None,
                         help='Specific instances to process (comma-separated or file)')
+    parser.add_argument('--timeout', type=int, default=300,
+                        help='Per-model timeout in seconds (default 300 = 5 min, 0 = no timeout)')
     dataset_utils.add_args(parser)
     parser.add_argument('--rank', type=int, default=0)
     parser.add_argument('--world_size', type=int, default=1)
-    parser.add_argument('--max_workers', type=int, default=1,
-                        help='Number of parallel workers (default 1 since gmsh may not be thread-safe)')
+    parser.add_argument('--max_workers', type=int, default=4,
+                        help='Number of parallel worker processes (default 4). '
+                             'Each gets its own gmsh instance. Set 1 for sequential.')
     opt = parser.parse_args(sys.argv[2:])
     opt = edict(vars(opt))
 
@@ -404,11 +431,10 @@ if __name__ == '__main__':
             records.append({'sha256': sha256, 'has_mesh': True, 'has_udf': True})
             metadata = metadata[metadata['sha256'] != sha256]
     
-    print(f'Processing {len(metadata)} STEP files...')
-    
-    # Process sequentially in main thread (gmsh doesn't work with threading)
-    processed_records = []
-    for i, (_, row) in enumerate(tqdm(metadata.iterrows(), total=len(metadata), desc='Processing STEP files')):
+    # Build work items
+    work_items = []
+    skipped_missing = 0
+    for _, row in metadata.iterrows():
         sha256 = row['sha256']
         local_path = row.get('local_path')
         if local_path:
@@ -417,23 +443,77 @@ if __name__ == '__main__':
             file_path = row.get('source_path')
         
         if file_path and os.path.exists(file_path):
-            record = _process_step(
-                file_path, sha256,
-                output_dir=opt.output_dir,
-                num_samples=opt.num_samples,
-                density=opt.density,
-                resolution=opt.resolution,
-                edge_bias=opt.edge_bias,
-                edge_threshold=opt.edge_threshold,
-            )
-            if record is not None:
-                processed_records.append(record)
+            work_items.append({
+                'file_path': file_path,
+                'sha256': sha256,
+                'output_dir': opt.output_dir,
+                'num_samples': opt.num_samples,
+                'density': opt.density,
+                'resolution': opt.resolution,
+                'edge_bias': opt.edge_bias,
+                'edge_threshold': opt.edge_threshold,
+            })
         else:
             print(f"File not found: {file_path}")
-    
+            skipped_missing += 1
+
+    n_workers = min(opt.max_workers, len(work_items)) if work_items else 1
+    timeout = opt.timeout if opt.timeout > 0 else None
+    print(f'Processing {len(work_items)} STEP files with {n_workers} workers '
+          f'(timeout={timeout}s)...')
+    if skipped_missing:
+        print(f'  Skipped {skipped_missing} missing files')
+
+    processed_records = []
+    n_timeout = 0
+    n_error = 0
+
+    if n_workers <= 1:
+        # Sequential fallback (useful for debugging)
+        for item in tqdm(work_items, desc='Processing STEP files'):
+            record = _worker_fn(item)
+            if record is not None:
+                processed_records.append(record)
+    else:
+        # Multiprocess: each worker gets its own gmsh instance
+        pool = Pool(processes=n_workers, initializer=_worker_init)
+        try:
+            async_results = []
+            for item in work_items:
+                ar = pool.apply_async(_worker_fn, (item,))
+                async_results.append((item['sha256'], ar))
+            
+            for sha256, ar in tqdm(async_results, desc='Processing STEP files'):
+                try:
+                    record = ar.get(timeout=timeout)
+                    if record is not None:
+                        processed_records.append(record)
+                except KeyboardInterrupt:
+                    print('\nInterrupted by user. Saving progress...')
+                    pool.terminate()
+                    break
+                except Exception as e:
+                    if 'TimeoutError' in type(e).__name__ or isinstance(e, TimeoutError):
+                        print(f'  TIMEOUT: {sha256} exceeded {timeout}s — skipping')
+                        n_timeout += 1
+                    else:
+                        print(f'  ERROR: {sha256}: {e}')
+                        n_error += 1
+            
+            pool.close()
+            pool.join()
+        except KeyboardInterrupt:
+            print('\nInterrupted. Terminating workers...')
+            pool.terminate()
+            pool.join()
+
     # Combine and save records
     processed = pd.DataFrame.from_records(processed_records + records)
     processed.to_csv(os.path.join(opt.output_dir, f'step_processed_{opt.rank}.csv'), index=False)
     
-    print(f'Processed {len(processed)} files')
+    n_success = len(processed_records)
+    n_skipped = len(records)
+    print(f'\nDone: {n_success} processed, {n_skipped} already existed, '
+          f'{n_timeout} timed out, {n_error} errors')
+    print(f'Total in output: {len(processed)}')
     print('Run build_metadata.py to update metadata.csv')
