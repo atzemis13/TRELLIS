@@ -304,8 +304,20 @@ def _process_step(file_path, sha256, output_dir, num_samples, density, resolutio
         voxel_size = 1.0 / resolution
         normalized_udf = vertex_udf / voxel_size
         
+        # Adaptive sample count: scale with mesh complexity so complex parts
+        # get adequate coverage.  num_samples from CLI is used as the base for
+        # a ~20K-face mesh; simpler parts get a floor, complex parts get more.
+        #   formula: max(50K, min(1.5M, face_count * 5))
+        # The CLI --num_samples is still respected as an override when set to
+        # a non-default value (anything other than 100000).
+        n_faces = len(normalized_mesh.faces)
+        if num_samples == 100000:  # default — use adaptive
+            adaptive_samples = max(50000, min(1500000, n_faces * 5))
+        else:
+            adaptive_samples = num_samples  # explicit override
+        
         # Sample surface points with UDF
-        points, udf = sample_surface_with_udf(normalized_mesh, normalized_udf, num_samples,
+        points, udf = sample_surface_with_udf(normalized_mesh, normalized_udf, adaptive_samples,
                                                edge_bias=edge_bias, edge_threshold=edge_threshold)
         
         # Save UDF data
@@ -326,6 +338,7 @@ def _process_step(file_path, sha256, output_dir, num_samples, density, resolutio
             'num_faces': len(normalized_mesh.faces),
             'num_vertices': len(normalized_mesh.vertices),
             'num_edges': len(edges),
+            'num_samples': adaptive_samples,
         }
         
     except Exception as e:
@@ -390,12 +403,14 @@ if __name__ == '__main__':
     os.makedirs(os.path.join(opt.output_dir, 'meshes'), exist_ok=True)
     os.makedirs(os.path.join(opt.output_dir, 'udf'), exist_ok=True)
 
+    metadata_path = os.path.join(opt.output_dir, 'metadata.csv')
 
-    # Build or load metadata
-    if not os.path.exists(os.path.join(opt.output_dir, 'metadata.csv')):
+    # Build or load metadata, with incremental update support
+    if not os.path.exists(metadata_path):
+        # First run: build from scratch
         print('Building metadata from source directory...')
         metadata = dataset_utils.get_metadata(**opt)
-        metadata.to_csv(os.path.join(opt.output_dir, 'metadata.csv'), index=False)
+        metadata.to_csv(metadata_path, index=False)
         print(f'Created metadata.csv with {len(metadata)} instances')
         
         # Also download/symlink files
@@ -404,9 +419,33 @@ if __name__ == '__main__':
         print(f'Linked {len(downloaded)} files')
         
         # Reload metadata with updated paths
-        metadata = pd.read_csv(os.path.join(opt.output_dir, 'metadata.csv'))
+        metadata = pd.read_csv(metadata_path)
     else:
-        metadata = pd.read_csv(os.path.join(opt.output_dir, 'metadata.csv'))
+        metadata = pd.read_csv(metadata_path)
+        
+        # Incremental update: if --source_dir is given, scan for new files
+        # not already in metadata and append them
+        if getattr(opt, 'source_dir', None) is not None:
+            try:
+                new_metadata = dataset_utils.get_metadata(**opt)
+                existing_ids = set(metadata['sha256'].values)
+                new_rows = new_metadata[~new_metadata['sha256'].isin(existing_ids)]
+                
+                if len(new_rows) > 0:
+                    print(f'Found {len(new_rows)} new STEP files in {opt.source_dir}')
+                    
+                    # Symlink new files
+                    downloaded = dataset_utils.download(new_rows, opt.output_dir)
+                    print(f'Linked {len(downloaded)} new files')
+                    
+                    # Append to metadata
+                    metadata = pd.concat([metadata, new_rows], ignore_index=True)
+                    metadata.to_csv(metadata_path, index=False)
+                    print(f'Updated metadata.csv: {len(metadata)} total instances')
+                else:
+                    print(f'No new files in {opt.source_dir} (all {len(existing_ids)} already in metadata)')
+            except Exception as e:
+                print(f'Warning: could not scan source_dir for updates: {e}')
     
     # Filter instances if specified
     if opt.instances is not None:
