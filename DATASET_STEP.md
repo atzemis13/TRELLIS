@@ -42,28 +42,52 @@ This generates for each STEP file:
 - `udf/{sha256}.npz` — Surface points with ground truth UDF values
 - `metadata.csv` — Dataset metadata index
 
-### Step 2: Standard TRELLIS Pipeline
+### Step 2: Render Multiview Images
 
-After STEP processing, run the standard pipeline steps from [DATASET.md](DATASET.md):
+STEP files cannot be imported by Blender, so we use `render_step.py` with the custom `step_renderer` binary instead of the standard `render.py`.
 
+**Prerequisites**: Build the step_renderer first:
 ```bash
-# Render multiview images
-python render.py STEPFiles --output_dir datasets/STEPFiles
-
-# Voxelize
-python voxelize.py STEPFiles --output_dir datasets/STEPFiles
-
-# Extract DINO features
-python extract_feature.py --output_dir datasets/STEPFiles
-
-# Encode SLat latents
-python encode_latent.py --output_dir datasets/STEPFiles
-
-# Update metadata after each step
-python build_metadata.py STEPFiles --output_dir datasets/STEPFiles
+cd step_renderer && mkdir -p build && cd build && cmake .. && make
 ```
 
-### Step 3: Train UDF Decoder
+Then render:
+```bash
+cd dataset_toolkits
+python render_step.py STEPFiles \
+    --output_dir ../datasets/STEPFiles \
+    --source_dir ../step_files \
+    --num_views 150 \
+    --max_workers 4
+```
+
+This generates for each instance:
+- `renders/{name}/000.png` … `149.png` — RGBA multiview images (512×512)
+- `renders/{name}/transforms.json` — Camera matrices (NeRF-style, needed by feature extraction)
+- `renders/{name}/views.json` — Camera parameters (yaw, pitch, radius, fov)
+- `renders/{name}/mesh.ply` — Mesh converted from OBJ (needed by voxelization)
+
+### Step 3: Standard TRELLIS Pipeline (Voxelize → Features → Latents)
+
+After rendering, run the remaining standard pipeline steps from [DATASET.md](DATASET.md):
+
+```bash
+cd dataset_toolkits
+
+# Voxelize
+python voxelize.py STEPFiles --output_dir ../datasets/STEPFiles --source_dir ../step_files
+
+# Extract DINO features
+python extract_feature.py --output_dir ../datasets/STEPFiles
+
+# Encode SLat latents
+python encode_latent.py --output_dir ../datasets/STEPFiles
+
+# Update metadata after each step
+python build_metadata.py STEPFiles --output_dir ../datasets/STEPFiles --source_dir ../step_files
+```
+
+### Step 4: Train UDF Decoder
 
 ```bash
 cd /path/to/TRELLIS
@@ -72,6 +96,33 @@ python -u train.py \
     --output output/udf_decoder \
     --data_dir datasets/STEPFiles
 ```
+
+## render_step.py Reference
+
+### CLI Arguments
+
+| Argument | Type | Default | Description |
+|----------|------|---------|-------------|
+| `--output_dir` | str | **required** | Directory with processed STEP data |
+| `--num_views` | int | 150 | Number of views to render per instance |
+| `--renderer` | str | auto-detect | Path to `step_render` executable |
+| `--instances` | str | None | Specific instances to process (comma-separated or file) |
+| `--source_dir` | str | None | Source STEP file directory (required by STEPFiles dataset module) |
+| `--rank` | int | 0 | Shard index for distributed processing |
+| `--world_size` | int | 1 | Total number of shards |
+| `--max_workers` | int | 4 | Parallel rendering workers |
+
+### Per-Instance Processing
+
+1. **Camera generation**: Generates `num_views` camera positions on a sphere (radius=2.0, FOV=40°) using Hammersley sequence with random offset for uniform coverage.
+
+2. **Rendering**: Calls `step_render` binary with STEP file path and views JSON. Produces 512×512 RGBA PNGs.
+
+3. **transforms.json**: Writes NeRF-compatible camera-to-world matrices. Feature extraction reads this to project DINOv2 features into 3D.
+
+4. **Mesh conversion**: Converts `meshes/{name}.obj` → `renders/{name}/mesh.ply` (required by `voxelize.py`).
+
+The script auto-skips instances that already have `transforms.json` with enough frames.
 
 ## prep_step_dataset.py Reference
 
