@@ -136,6 +136,23 @@ def _render_step(file_path, sha256, output_dir, num_views, renderer_path):
             "transform_matrix": compute_transform_matrix(yaw, pitch, radius)
         })
     
+    # Load normalization params from UDF data so the renderer applies the
+    # same coordinate transform as the mesher (critical for UDF alignment).
+    udf_path = os.path.join(output_dir, 'udf', f'{sha256}.npz')
+    scale = 1.0
+    offset_vec = [0, 0, 0]
+    norm_args = []
+    if os.path.exists(udf_path):
+        udf_data = np.load(udf_path)
+        if 'scale' in udf_data:
+            scale = float(udf_data['scale'][0])
+        if 'offset' in udf_data:
+            offset_vec = udf_data['offset'].tolist()
+        norm_args = [
+            '--scale', str(scale),
+            '--offset', str(offset_vec[0]), str(offset_vec[1]), str(offset_vec[2]),
+        ]
+
     # Write views.json for step_renderer
     views_file = os.path.join(output_folder, "views.json")
     with open(views_file, "w") as f:
@@ -144,7 +161,7 @@ def _render_step(file_path, sha256, output_dir, num_views, renderer_path):
     # Run step_renderer
     try:
         result = subprocess.run(
-            [renderer_path, "--object", file_path, "--views", views_file],
+            [renderer_path, "--object", file_path, "--views", views_file] + norm_args,
             capture_output=True,
             text=True,
             check=True
@@ -156,17 +173,6 @@ def _render_step(file_path, sha256, output_dir, num_views, renderer_path):
         print(f"Renderer not found at {renderer_path}")
         print("Build with: cd step_renderer && mkdir -p build && cd build && cmake .. && make")
         return None
-    
-    # Load normalization params from UDF data if available
-    udf_path = os.path.join(output_dir, 'udf', f'{sha256}.npz')
-    scale = 1.0
-    offset_vec = [0, 0, 0]
-    if os.path.exists(udf_path):
-        udf_data = np.load(udf_path)
-        if 'scale' in udf_data:
-            scale = float(udf_data['scale'][0])
-        if 'offset' in udf_data:
-            offset_vec = udf_data['offset'].tolist()
     
     # Write transforms.json
     transforms = {
