@@ -105,6 +105,15 @@ if __name__ == '__main__':
     for model in ss_latent_models:
         if f'ss_latent_{model}' not in metadata.columns:
             metadata[f'ss_latent_{model}'] = [False] * len(metadata)
+
+    # Fill NaN with False for all boolean columns (CSV round-trip loses False→NaN)
+    bool_cols = ['rendered', 'voxelized', 'cond_rendered', 'has_mesh', 'has_udf']
+    bool_cols += [f'feature_{m}' for m in image_models]
+    bool_cols += [f'latent_{m}' for m in latent_models]
+    bool_cols += [f'ss_latent_{m}' for m in ss_latent_models]
+    for col in bool_cols:
+        if col in metadata.columns:
+            metadata[col] = metadata[col].fillna(False)
     
     # merge step_processed (STEP files dataset)
     df_files = [f for f in os.listdir(opt.output_dir) if f.startswith('step_processed_') and f.endswith('.csv')]
@@ -283,6 +292,15 @@ if __name__ == '__main__':
             
             executor.map(worker, metadata.index)
             executor.shutdown(wait=True)
+
+    # Ensure boolean columns are proper bool before saving (prevents NaN on CSV round-trip)
+    bool_save_cols = ['rendered', 'voxelized', 'cond_rendered', 'has_mesh', 'has_udf']
+    bool_save_cols += [f'feature_{m}' for m in image_models]
+    bool_save_cols += [f'latent_{m}' for m in latent_models]
+    bool_save_cols += [f'ss_latent_{m}' for m in ss_latent_models]
+    for col in bool_save_cols:
+        if col in metadata.columns:
+            metadata[col] = metadata[col].fillna(False).astype(bool)
 
     # statistics
     metadata.to_csv(os.path.join(opt.output_dir, 'metadata.csv'))

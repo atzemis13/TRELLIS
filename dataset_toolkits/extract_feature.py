@@ -21,7 +21,7 @@ torch.set_grad_enabled(False)
 
 
 def get_data(frames, sha256):
-    with ThreadPoolExecutor(max_workers=16) as executor:
+    with ThreadPoolExecutor(max_workers=4) as executor:
         def worker(view):
             image_path = os.path.join(opt.output_dir, 'renders', sha256, view['file_path'])
             try:
@@ -109,10 +109,10 @@ if __name__ == '__main__':
             sha256s.remove(sha256)
 
     # extract features
-    load_queue = Queue(maxsize=4)
+    load_queue = Queue(maxsize=2)
     try:
-        with ThreadPoolExecutor(max_workers=8) as loader_executor, \
-            ThreadPoolExecutor(max_workers=8) as saver_executor:
+        with ThreadPoolExecutor(max_workers=2) as loader_executor, \
+            ThreadPoolExecutor(max_workers=2) as saver_executor:
             def loader(sha256):
                 try:
                     with open(os.path.join(opt.output_dir, 'renders', sha256, 'transforms.json'), 'r') as f:

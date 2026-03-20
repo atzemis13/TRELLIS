@@ -85,10 +85,10 @@ if __name__ == '__main__':
             sha256s.remove(sha256)
 
     # encode latents
-    load_queue = Queue(maxsize=4)
+    load_queue = Queue(maxsize=2)
     try:
-        with ThreadPoolExecutor(max_workers=32) as loader_executor, \
-            ThreadPoolExecutor(max_workers=32) as saver_executor:
+        with ThreadPoolExecutor(max_workers=2) as loader_executor, \
+            ThreadPoolExecutor(max_workers=2) as saver_executor:
             def loader(sha256):
                 try:
                     feats = np.load(os.path.join(opt.output_dir, 'features', opt.feat_model, f'{sha256}.npz'))

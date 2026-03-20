@@ -44,12 +44,14 @@ class SLat2UDF(StandardDatasetBase):
         min_aesthetic_score: float = 5.0,
         max_num_voxels: int = 32768,
         augment_points: bool = True,
+        exclude_instances: list = None,
     ):
         self.latent_model = latent_model
         self.num_surface_points = num_surface_points
         self.min_aesthetic_score = min_aesthetic_score
         self.max_num_voxels = max_num_voxels
         self.augment_points = augment_points
+        self.exclude_instances = exclude_instances or []
         
         super().__init__(roots)
         
@@ -58,6 +60,11 @@ class SLat2UDF(StandardDatasetBase):
         
     def filter_metadata(self, metadata):
         stats = {}
+        
+        # Exclude holdout instances
+        if self.exclude_instances:
+            metadata = metadata[~metadata['sha256'].isin(self.exclude_instances)]
+            stats['After holdout exclusion'] = len(metadata)
         
         # Filter for latent availability
         metadata = metadata[metadata[f'latent_{self.latent_model}']]

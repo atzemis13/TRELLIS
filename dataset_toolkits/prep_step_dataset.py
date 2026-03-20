@@ -438,8 +438,11 @@ if __name__ == '__main__':
                     downloaded = dataset_utils.download(new_rows, opt.output_dir)
                     print(f'Linked {len(downloaded)} new files')
                     
-                    # Append to metadata
+                    # Append to metadata (fill missing bool columns so they don't become NaN)
                     metadata = pd.concat([metadata, new_rows], ignore_index=True)
+                    for col in metadata.columns:
+                        if metadata[col].dtype == object and set(metadata[col].dropna().unique()) <= {True, False, 'True', 'False'}:
+                            metadata[col] = metadata[col].fillna(False)
                     metadata.to_csv(metadata_path, index=False)
                     print(f'Updated metadata.csv: {len(metadata)} total instances')
                 else:
