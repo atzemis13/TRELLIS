@@ -27,49 +27,58 @@ Output structure:
 import os
 import argparse
 import glob
+import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
 import pandas as pd
 
 
+def _sha256(path):
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(1 << 20), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def add_args(parser: argparse.ArgumentParser):
     """Add dataset-specific arguments to parser."""
     parser.add_argument('--source_dir', type=str, default=None,
-                        help='Directory containing STEP files (only needed for initial setup)')
+                        help='Directory containing STEP/x_t files (only needed for initial setup)')
 
 
 def get_metadata(source_dir=None, output_dir=None, **kwargs):
     """
-    Build metadata from STEP files in source directory.
-    
-    Uses filename stem as the identifier (instead of SHA256 hash).
+    Build metadata from CAD files in source directory.
+
+    Supports .step, .stp, and .x_t files. Uses SHA256 hash of file content as
+    the identifier so NPZ files produced by 'nmr --convert' (which are also
+    named by SHA256) match automatically.
     """
     if source_dir is None:
         raise ValueError("--source_dir is required for STEPFiles dataset")
-    
-    step_files = sorted(
-        glob.glob(os.path.join(source_dir, "*.step")) +
-        glob.glob(os.path.join(source_dir, "*.stp")) +
-        glob.glob(os.path.join(source_dir, "*.STEP")) +
-        glob.glob(os.path.join(source_dir, "*.STP"))
+
+    exts = ("*.step", "*.stp", "*.STEP", "*.STP", "*.x_t", "*.X_T")
+    cad_files = sorted(
+        f for pat in exts for f in glob.glob(os.path.join(source_dir, pat))
     )
-    
-    if len(step_files) == 0:
-        raise ValueError(f"No STEP files found in {source_dir}")
-    
+
+    if len(cad_files) == 0:
+        raise ValueError(f"No CAD files (.step/.stp/.x_t) found in {source_dir}")
+
     records = []
-    for step_file in step_files:
-        name = os.path.splitext(os.path.basename(step_file))[0]
+    for cad_file in tqdm(cad_files, desc='Hashing source files', leave=False):
+        sha = _sha256(cad_file)
+        ext = os.path.splitext(cad_file)[1].lower()
         records.append({
-            'sha256': name,  # Using filename as identifier
-            'name': name,
-            'source_path': os.path.abspath(step_file),
-            'local_path': f'raw/{name}.step',
-            # Default values for filtering (bypass aesthetic score filter)
+            'sha256': sha,
+            'name': os.path.splitext(os.path.basename(cad_file))[0],
+            'source_path': os.path.abspath(cad_file),
+            'local_path': f'raw/{sha}{ext}',
             'aesthetic_score': 5.5,
             'captions': '["CAD part"]',
         })
-    
+
     return pd.DataFrame(records)
 
 
@@ -85,17 +94,17 @@ def download(metadata, output_dir, **kwargs):
     for _, row in metadata.iterrows():
         name = row['sha256']
         source = row['source_path']
-        dest = os.path.join(output_dir, 'raw', f'{name}.step')
+        ext = os.path.splitext(source)[1].lower()
+        dest = os.path.join(output_dir, 'raw', f'{name}{ext}')
         
         if not os.path.exists(dest):
-            # Create symlink or copy
             if os.path.exists(source):
                 os.symlink(source, dest)
-                downloaded[name] = f'raw/{name}.step'
+                downloaded[name] = f'raw/{name}{ext}'
             else:
                 print(f"Warning: Source file not found: {source}")
         else:
-            downloaded[name] = f'raw/{name}.step'
+            downloaded[name] = f'raw/{name}{ext}'
     
     return pd.DataFrame(downloaded.items(), columns=['sha256', 'local_path'])
 
