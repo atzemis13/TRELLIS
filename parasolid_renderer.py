@@ -42,8 +42,8 @@ def parse_args():
                    help='Ignored (NMR auto-fits to bounding sphere)')
     p.add_argument('--offset',     type=float, nargs=3, default=None,
                    help='Ignored (NMR auto-fits to bounding sphere)')
-    p.add_argument('--width',  type=int, default=512)
-    p.add_argument('--height', type=int, default=512)
+    p.add_argument('--width',  type=int, default=1024)
+    p.add_argument('--height', type=int, default=1024)
     return p.parse_args()
 
 # ---------------------------------------------------------------------------
