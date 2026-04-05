@@ -98,7 +98,7 @@ def compute_transform_matrix(yaw, pitch, radius):
     return transform.tolist()
 
 
-def _render_step(file_path, sha256, output_dir, num_views, renderer_path):
+def _render_step(file_path, sha256, output_dir, num_views, renderer_path, npz_dir=None):
     """Render a single STEP file."""
     
     output_folder = os.path.join(output_dir, 'renders', sha256)
@@ -158,20 +158,23 @@ def _render_step(file_path, sha256, output_dir, num_views, renderer_path):
     with open(views_file, "w") as f:
         json.dump(views, f)
     
-    # Run step_renderer
+    # Build renderer command — Python scripts get invoked via sys.executable
+    if renderer_path.endswith('.py'):
+        cmd = [sys.executable, renderer_path]
+        if npz_dir and os.path.isdir(npz_dir):
+            cmd += ['--npz_dir', npz_dir]
+    else:
+        cmd = [renderer_path]
+    cmd += ["--object", file_path, "--views", views_file] + norm_args
+
+    # Run renderer
     try:
-        result = subprocess.run(
-            [renderer_path, "--object", file_path, "--views", views_file] + norm_args,
-            capture_output=True,
-            text=True,
-            check=True
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
     except subprocess.CalledProcessError as e:
         print(f"Renderer failed for {sha256}: {e.stderr}")
         return None
     except FileNotFoundError:
         print(f"Renderer not found at {renderer_path}")
-        print("Build with: cd step_renderer && mkdir -p build && cd build && cmake .. && make")
         return None
     
     # Write transforms.json
@@ -211,7 +214,9 @@ if __name__ == '__main__':
     parser.add_argument('--num_views', type=int, default=150,
                         help='Number of views to render')
     parser.add_argument('--renderer', type=str, default=None,
-                        help='Path to step_render executable')
+                        help='Path to renderer (step_render binary or parasolid_renderer.py)')
+    parser.add_argument('--npz_dir', type=str, default=None,
+                        help='Directory of pre-built NMR NPZ files (for parasolid_renderer.py)')
     parser.add_argument('--instances', type=str, default=None,
                         help='Specific instances to process')
     dataset_utils.add_args(parser)
@@ -223,22 +228,24 @@ if __name__ == '__main__':
 
     # Find renderer
     if opt.renderer is None:
-        # Try common locations
+        # Try Parasolid renderer first (Python, no build required), then step_render binary
         candidates = [
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'parasolid_renderer.py'),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'parasolid_renderer.py'),
             os.path.join(os.path.dirname(os.path.dirname(__file__)), 'step_renderer', 'build', 'step_render'),
             os.path.join(os.path.dirname(os.path.dirname(__file__)), 'step_renderer', 'build', 'render_step'),
             '/usr/local/bin/step_render',
         ]
         for c in candidates:
-            if os.path.exists(c) and os.access(c, os.X_OK):
+            c = os.path.abspath(c)
+            if os.path.exists(c) and (c.endswith('.py') or os.access(c, os.X_OK)):
                 opt.renderer = c
                 break
-        
+
         if opt.renderer is None:
-            print("Error: step_render executable not found")
-            print("Build with: cd step_renderer && mkdir -p build && cd build && cmake .. && make")
+            print("Error: no renderer found (tried parasolid_renderer.py and step_render binary)")
             sys.exit(1)
-    
+
     print(f"Using renderer: {opt.renderer}")
 
     os.makedirs(os.path.join(opt.output_dir, 'renders'), exist_ok=True)
@@ -285,6 +292,7 @@ if __name__ == '__main__':
         output_dir=opt.output_dir,
         num_views=opt.num_views,
         renderer_path=opt.renderer,
+        npz_dir=getattr(opt, 'npz_dir', None),
     )
     
     rendered = dataset_utils.foreach_instance(
