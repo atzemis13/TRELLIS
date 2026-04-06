@@ -91,7 +91,7 @@ if __name__ == '__main__':
         metadata['num_voxels'] = [0] * len(metadata)
     if 'cond_rendered' not in metadata.columns:
         metadata['cond_rendered'] = [False] * len(metadata)
-    # UDF-specific columns (for STEP files dataset)
+    # UDF-specific columns (for Parasolid CAD dataset)
     if 'has_mesh' not in metadata.columns:
         metadata['has_mesh'] = [False] * len(metadata)
     if 'has_udf' not in metadata.columns:
@@ -115,7 +115,7 @@ if __name__ == '__main__':
         if col in metadata.columns:
             metadata[col] = metadata[col].fillna(False)
     
-    # merge step_processed (STEP files dataset)
+    # merge step_processed (Parasolid CAD dataset)
     df_files = [f for f in os.listdir(opt.output_dir) if f.startswith('step_processed_') and f.endswith('.csv')]
     df_parts = []
     for f in df_files:
@@ -244,7 +244,7 @@ if __name__ == '__main__':
             tqdm(total=len(metadata), desc="Building metadata") as pbar:
             def worker(sha256):
                 try:
-                    # Check for STEP preprocessing (mesh + UDF)
+                    # Check for Parasolid preprocessing (mesh + UDF)
                     if need_process('has_mesh') and metadata.loc[sha256, 'has_mesh'] == False and \
                         os.path.exists(os.path.join(opt.output_dir, 'meshes', f'{sha256}.obj')):
                         metadata.loc[sha256, 'has_mesh'] = True
@@ -309,7 +309,7 @@ if __name__ == '__main__':
         f.write('Statistics:\n')
         f.write(f'  - Number of assets: {len(metadata)}\n')
         f.write(f'  - Number of assets downloaded: {num_downloaded}\n')
-        # STEP-specific stats
+        # Parasolid/UDF-specific stats
         if 'has_mesh' in metadata.columns:
             f.write(f'  - Number of assets with mesh: {metadata["has_mesh"].sum()}\n')
         if 'has_udf' in metadata.columns:

@@ -1,21 +1,21 @@
 """
-STEPFiles dataset utilities.
+ParasolidFiles dataset utilities.
 
-This module handles a simple custom dataset of STEP files in a folder.
+This module handles a custom dataset of Parasolid/CAD files in a folder.
 Unlike other datasets that pull from HuggingFace CSVs, this discovers
-STEP files directly from a source directory.
+CAD files directly from a source directory.
 
 Expected structure:
     source_dir/
-        ├── part1.step
-        ├── part2.stp
+        ├── part1.x_t
+        ├── part2.x_t
         └── ...
 
 Output structure:
     output_dir/
         ├── metadata.csv
-        ├── raw/{name}.step        # Symlinks to source
-        ├── meshes/{name}.obj      # Meshed from STEP
+        ├── raw/{name}.x_t         # Symlinks to source
+        ├── meshes/{name}.obj      # Meshed via Parasolid
         ├── udf/{name}.npz         # Surface points + UDF
         ├── renders/{name}/        # Multiview renders + transforms.json
         ├── voxels/{name}.ply      # Voxelized mesh
@@ -44,27 +44,27 @@ def _sha256(path):
 def add_args(parser: argparse.ArgumentParser):
     """Add dataset-specific arguments to parser."""
     parser.add_argument('--source_dir', type=str, default=None,
-                        help='Directory containing STEP/x_t files (only needed for initial setup)')
+                        help='Directory containing Parasolid x_t files (only needed for initial setup)')
 
 
 def get_metadata(source_dir=None, output_dir=None, **kwargs):
     """
-    Build metadata from CAD files in source directory.
+    Build metadata from Parasolid files in source directory.
 
-    Supports .step, .stp, and .x_t files. Uses SHA256 hash of file content as
-    the identifier so NPZ files produced by 'nmr --convert' (which are also
-    named by SHA256) match automatically.
+    Uses SHA256 hash of file content as the identifier so NPZ files
+    produced by 'nmr --convert' (which are also named by SHA256) match
+    automatically.
     """
     if source_dir is None:
-        raise ValueError("--source_dir is required for STEPFiles dataset")
+        raise ValueError("--source_dir is required for ParasolidFiles dataset")
 
-    exts = ("*.step", "*.stp", "*.STEP", "*.STP", "*.x_t", "*.X_T")
+    exts = ("*.x_t", "*.X_T", "*.x_b", "*.xmt_txt")
     cad_files = sorted(
         f for pat in exts for f in glob.glob(os.path.join(source_dir, pat))
     )
 
     if len(cad_files) == 0:
-        raise ValueError(f"No CAD files (.step/.stp/.x_t) found in {source_dir}")
+        raise ValueError(f"No Parasolid files (.x_t/.x_b/.xmt_txt) found in {source_dir}")
 
     records = []
     for cad_file in tqdm(cad_files, desc='Hashing source files', leave=False):
@@ -84,9 +84,9 @@ def get_metadata(source_dir=None, output_dir=None, **kwargs):
 
 def download(metadata, output_dir, **kwargs):
     """
-    "Download" STEP files by creating symlinks to source.
-    
-    For STEPFiles, this just creates symlinks since files are already local.
+    "Download" Parasolid files by creating symlinks to source.
+
+    Creates symlinks since files are already local.
     """
     os.makedirs(os.path.join(output_dir, 'raw'), exist_ok=True)
     
@@ -112,9 +112,9 @@ def download(metadata, output_dir, **kwargs):
 def foreach_instance(metadata, output_dir, func, max_workers=None, desc='Processing objects') -> pd.DataFrame:
     """
     Process each instance with the given function.
-    
-    For STEPFiles, this is simpler than other datasets since files are
-    directly accessible (no zip extraction needed).
+
+    Simpler than other datasets since files are directly accessible
+    (no zip extraction needed).
     """
     metadata_list = metadata.to_dict('records')
     records = []
@@ -155,8 +155,8 @@ def foreach_instance(metadata, output_dir, func, max_workers=None, desc='Process
     return pd.DataFrame.from_records(records)
 
 
-def get_step_file_path(metadata_row, output_dir):
-    """Get the actual STEP file path for an instance."""
+def get_cad_file_path(metadata_row, output_dir):
+    """Get the actual CAD file path for an instance."""
     local_path = metadata_row.get('local_path')
     if local_path:
         return os.path.join(output_dir, local_path)

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Prepare Parasolid (STEP) files for TRELLIS UDF decoder training.
+Prepare Parasolid files for TRELLIS UDF decoder training.
 
 This script is Stage 2 of a two-stage pipeline:
   Stage 1 (external): nmr --convert input.x_t -o {sha256}.npz
@@ -16,9 +16,9 @@ Output per instance:
   udf/{sha256}.npz      — Surface points with ground-truth UDF values
 
 Usage:
-    python prep_step_dataset.py STEPFiles \
+    python prep_parasolid_dataset.py ParasolidFiles \
         --npz_dir /path/to/parasolid_npz \
-        --output_dir datasets/STEPFiles
+        --output_dir datasets/ParasolidFiles
 """
 
 import os

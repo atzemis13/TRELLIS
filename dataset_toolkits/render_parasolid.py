@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Render multiview images from STEP files using step_renderer.
+Render multiview images from Parasolid/CAD files.
 
 This creates renders in the format expected by TRELLIS feature extraction,
 including the transforms.json file with camera matrices.
 
 Usage:
-    python render_step.py STEPFiles --output_dir datasets/STEPFiles [--num_views 150]
+    python render_parasolid.py ParasolidFiles --output_dir datasets/ParasolidFiles [--num_views 150]
 
 Prerequisites:
-    - step_renderer must be built: cd step_renderer && mkdir build && cd build && cmake .. && make
-    - STEP files must be preprocessed: python prep_step_dataset.py STEPFiles --source_dir ... --output_dir ...
+    - NMR must be built (for parasolid_renderer.py)
+    - CAD files must be preprocessed: python prep_parasolid_dataset.py ParasolidFiles --source_dir ... --output_dir ...
 """
 
 import os
@@ -98,8 +98,8 @@ def compute_transform_matrix(yaw, pitch, radius):
     return transform.tolist()
 
 
-def _render_step(file_path, sha256, output_dir, num_views, renderer_path, npz_dir=None):
-    """Render a single STEP file."""
+def _render_instance(file_path, sha256, output_dir, num_views, renderer_path, npz_dir=None):
+    """Render a single CAD file."""
     
     output_folder = os.path.join(output_dir, 'renders', sha256)
     os.makedirs(output_folder, exist_ok=True)
@@ -153,7 +153,7 @@ def _render_step(file_path, sha256, output_dir, num_views, renderer_path, npz_di
             '--offset', str(offset_vec[0]), str(offset_vec[1]), str(offset_vec[2]),
         ]
 
-    # Write views.json for step_renderer
+    # Write views.json for renderer
     views_file = os.path.join(output_folder, "views.json")
     with open(views_file, "w") as f:
         json.dump(views, f)
@@ -210,11 +210,11 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--output_dir', type=str, required=True,
-                        help='Directory with processed STEP data')
+                        help='Directory with processed CAD data')
     parser.add_argument('--num_views', type=int, default=150,
                         help='Number of views to render')
     parser.add_argument('--renderer', type=str, default=None,
-                        help='Path to renderer (step_render binary or parasolid_renderer.py)')
+                        help='Path to parasolid_renderer.py')
     parser.add_argument('--npz_dir', type=str, default=None,
                         help='Directory of pre-built NMR NPZ files (for parasolid_renderer.py)')
     parser.add_argument('--instances', type=str, default=None,
@@ -226,25 +226,8 @@ if __name__ == '__main__':
     opt = parser.parse_args(sys.argv[2:])
     opt = edict(vars(opt))
 
-    # Find renderer
     if opt.renderer is None:
-        # Try Parasolid renderer first (Python, no build required), then step_render binary
-        candidates = [
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'parasolid_renderer.py'),
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'parasolid_renderer.py'),
-            os.path.join(os.path.dirname(os.path.dirname(__file__)), 'step_renderer', 'build', 'step_render'),
-            os.path.join(os.path.dirname(os.path.dirname(__file__)), 'step_renderer', 'build', 'render_step'),
-            '/usr/local/bin/step_render',
-        ]
-        for c in candidates:
-            c = os.path.abspath(c)
-            if os.path.exists(c) and (c.endswith('.py') or os.access(c, os.X_OK)):
-                opt.renderer = c
-                break
-
-        if opt.renderer is None:
-            print("Error: no renderer found (tried parasolid_renderer.py and step_render binary)")
-            sys.exit(1)
+        opt.renderer = os.path.join(os.path.dirname(__file__), '..', 'parasolid_renderer.py')
 
     print(f"Using renderer: {opt.renderer}")
 
@@ -252,7 +235,7 @@ if __name__ == '__main__':
 
     # Load metadata
     if not os.path.exists(os.path.join(opt.output_dir, 'metadata.csv')):
-        raise ValueError('metadata.csv not found. Run prep_step_dataset.py first.')
+        raise ValueError('metadata.csv not found. Run prep_parasolid_dataset.py first.')
     
     metadata = pd.read_csv(os.path.join(opt.output_dir, 'metadata.csv'))
     
@@ -284,11 +267,11 @@ if __name__ == '__main__':
             records.append({'sha256': sha256, 'rendered': True})
             metadata = metadata[metadata['sha256'] != sha256]
     
-    print(f'Rendering {len(metadata)} STEP files...')
+    print(f'Rendering {len(metadata)} CAD files...')
     
     # Process
     func = partial(
-        _render_step,
+        _render_instance,
         output_dir=opt.output_dir,
         num_views=opt.num_views,
         renderer_path=opt.renderer,
@@ -298,7 +281,7 @@ if __name__ == '__main__':
     rendered = dataset_utils.foreach_instance(
         metadata, opt.output_dir, func,
         max_workers=opt.max_workers,
-        desc='Rendering STEP files'
+        desc='Rendering CAD files'
     )
     
     rendered = pd.concat([rendered, pd.DataFrame.from_records(records)])

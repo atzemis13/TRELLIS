@@ -1,6 +1,6 @@
-# STEP File Dataset Preparation
+# Parasolid Dataset Preparation
 
-This document covers data preparation for **STEP (CAD) files** used to train the UDF decoder. It is an addendum to [DATASET.md](DATASET.md), which covers the standard TRELLIS pipeline for mesh/image datasets.
+This document covers data preparation for **Parasolid (`.x_t`) CAD files** used to train the UDF decoder. It is an addendum to [DATASET.md](DATASET.md), which covers the standard TRELLIS pipeline for mesh/image datasets.
 
 ## Overview
 
@@ -11,14 +11,14 @@ The UDF decoder predicts geodesic distance from each grid vertex to the nearest 
 2. Identifies which vertices lie on B-Rep edges (excluding seam edges)
 3. Outputs `{sha256}.npz` files with `vertices`, `faces`, and `edge_vertices` arrays
 
-**Stage 2 — UDF computation (`prep_step_dataset.py`):**
+**Stage 2 — UDF computation (`prep_parasolid_dataset.py`):**
 1. Loads Stage-1 NPZs
 2. Normalizes the mesh to [-0.5, 0.5]³
 3. Computes geodesic distance fields (heat method) from B-Rep edge vertices
 4. Samples surface points with edge-biased distribution
 5. Produces `.npz` files compatible with the `SLat2UDF` dataset class
 
-After STEP-specific processing, the standard TRELLIS pipeline (render, voxelize, extract features, encode latents) is run as described in [DATASET.md](DATASET.md).
+After Parasolid-specific processing, the standard TRELLIS pipeline (render, voxelize, extract features, encode latents) is run as described in [DATASET.md](DATASET.md).
 
 ## Prerequisites
 
@@ -34,7 +34,7 @@ pip install potpourri3d trimesh
 
 ### Step 0: Prepare Parasolid Files
 
-Place Parasolid (`.x_t`) files in a source directory (e.g., `step_files/`).
+Place Parasolid (`.x_t`) files in a source directory (e.g., `parasolid_files/`).
 
 ### Step 1a: Facet with Parasolid (NMR)
 
@@ -45,9 +45,9 @@ NMR=/path/to/nmr/build/nmr-server
 DYLD_LIBRARY_PATH=/path/to/nmr/parasolid/shared_object  # macOS only
 NPZ_DIR=/path/to/parasolid_npz
 
-for f in step_files/*.x_t; do
+for f in parasolid_files/*.x_t; do
     sha=$(shasum -a 256 "$f" | awk '{print $1}')
-    $NMR --convert "$f" -o "$NPZ_DIR/${sha}.npz"
+    $NMR --convert "$f" --tess-max-width 0.02 -o "$NPZ_DIR/${sha}.npz"
 done
 ```
 
@@ -58,10 +58,10 @@ This produces for each file:
 
 ```bash
 cd dataset_toolkits
-python prep_step_dataset.py STEPFiles \
-    --source_dir /path/to/step_files \
+python prep_parasolid_dataset.py ParasolidFiles \
+    --source_dir /path/to/parasolid_files \
     --npz_dir /path/to/parasolid_npz \
-    --output_dir datasets/STEPFiles
+    --output_dir datasets/ParasolidFiles
 ```
 
 This generates for each instance:
@@ -71,25 +71,19 @@ This generates for each instance:
 
 ### Step 2: Render Multiview Images
 
-STEP files cannot be imported by Blender, so we use `render_step.py` with the custom `step_renderer` binary instead of the standard `render.py`.
+Parasolid files are rendered using `render_parasolid.py` with the NMR-based `parasolid_renderer.py` instead of the standard Blender-based `render.py`.
 
-**Prerequisites**: Build the step_renderer first:
-```bash
-cd step_renderer && mkdir -p build && cd build && cmake .. && make
-```
-
-Then render:
 ```bash
 cd dataset_toolkits
-python render_step.py STEPFiles \
-    --output_dir ../datasets/STEPFiles \
-    --source_dir ../step_files \
+python render_parasolid.py ParasolidFiles \
+    --output_dir ../datasets/ParasolidFiles \
+    --source_dir ../parasolid_files \
     --num_views 150 \
     --max_workers 4
 ```
 
 This generates for each instance:
-- `renders/{name}/000.png` … `149.png` — RGBA multiview images (512×512)
+- `renders/{name}/000.png` … `149.png` — RGBA multiview images (1024×1024)
 - `renders/{name}/transforms.json` — Camera matrices (NeRF-style, needed by feature extraction)
 - `renders/{name}/views.json` — Camera parameters (yaw, pitch, radius, fov)
 - `renders/{name}/mesh.ply` — Mesh converted from OBJ (needed by voxelization)
@@ -102,16 +96,16 @@ After rendering, run the remaining standard pipeline steps from [DATASET.md](DAT
 cd dataset_toolkits
 
 # Voxelize
-python voxelize.py STEPFiles --output_dir ../datasets/STEPFiles --source_dir ../step_files
+python voxelize.py ParasolidFiles --output_dir ../datasets/ParasolidFiles --source_dir ../parasolid_files
 
 # Extract DINO features
-python extract_feature.py --output_dir ../datasets/STEPFiles
+python extract_feature.py --output_dir ../datasets/ParasolidFiles
 
 # Encode SLat latents
-python encode_latent.py --output_dir ../datasets/STEPFiles
+python encode_latent.py --output_dir ../datasets/ParasolidFiles
 
 # Update metadata after each step
-python build_metadata.py STEPFiles --output_dir ../datasets/STEPFiles --source_dir ../step_files
+python build_metadata.py ParasolidFiles --output_dir ../datasets/ParasolidFiles --source_dir ../parasolid_files
 ```
 
 ### Step 4: Train UDF Decoder
@@ -121,37 +115,26 @@ cd /path/to/TRELLIS
 python -u train.py \
     --config configs/vae/slat_vae_dec_udf_swin8_B_64l8_fp16.json \
     --output output/udf_decoder \
-    --data_dir datasets/STEPFiles
+    --data_dir datasets/ParasolidFiles
 ```
 
-## render_step.py Reference
+## render_parasolid.py Reference
 
 ### CLI Arguments
 
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
-| `--output_dir` | str | **required** | Directory with processed STEP data |
+| `--output_dir` | str | **required** | Directory with processed CAD data |
 | `--num_views` | int | 150 | Number of views to render per instance |
-| `--renderer` | str | auto-detect | Path to `step_render` executable |
+| `--renderer` | str | auto-detect | Path to parasolid_renderer.py |
+| `--npz_dir` | str | None | Directory of pre-built NMR NPZ files (for parasolid_renderer.py) |
 | `--instances` | str | None | Specific instances to process (comma-separated or file) |
-| `--source_dir` | str | None | Source STEP file directory (required by STEPFiles dataset module) |
+| `--source_dir` | str | None | Source Parasolid file directory (required by ParasolidFiles dataset module) |
 | `--rank` | int | 0 | Shard index for distributed processing |
 | `--world_size` | int | 1 | Total number of shards |
 | `--max_workers` | int | 4 | Parallel rendering workers |
 
-### Per-Instance Processing
-
-1. **Camera generation**: Generates `num_views` camera positions on a sphere (radius=2.0, FOV=40°) using Hammersley sequence with random offset for uniform coverage.
-
-2. **Rendering**: Calls `step_render` binary with STEP file path and views JSON. Produces 512×512 RGBA PNGs.
-
-3. **transforms.json**: Writes NeRF-compatible camera-to-world matrices. Feature extraction reads this to project DINOv2 features into 3D.
-
-4. **Mesh conversion**: Converts `meshes/{name}.obj` → `renders/{name}/mesh.ply` (required by `voxelize.py`).
-
-The script auto-skips instances that already have `transforms.json` with enough frames.
-
-## prep_step_dataset.py Reference
+## prep_parasolid_dataset.py Reference
 
 ### CLI Arguments
 
@@ -168,22 +151,6 @@ The script auto-skips instances that already have `transforms.json` with enough 
 | `--world_size` | int | 1 | Total number of shards |
 | `--max_workers` | int | 4 | Parallel workers |
 
-### Processing Steps (per instance)
-
-1. **Load NPZ**: Reads the Parasolid-generated NPZ (`vertices` [V,3] float64, `faces` [F,3] int32, `edge_vertices` [E] int32).
-
-2. **Normalization**: Centers mesh at origin, scales to fit [-0.5, 0.5]³ with 5% margin (TRELLIS convention).
-
-3. **Geodesic UDF**: Computes multi-source geodesic distance from all B-Rep edge vertices using the heat method (`potpourri3d`). Clamps to ≥ 0. Divides by `voxel_size = 1/resolution` so UDF=1.0 = one voxel width.
-
-4. **Surface point sampling**: Samples points on the mesh surface using area-weighted barycentric sampling with edge-biased distribution. Interpolates per-vertex UDF to sample points via barycentric coordinates.
-
-### Edge-Biased Sampling
-
-By default, 50% of sampled points are drawn preferentially from triangles near B-Rep edges (mean vertex UDF < `--edge_threshold`), and 50% are drawn uniformly by area. This gives much denser supervision in the near-edge region where UDF values change rapidly and precision matters most.
-
-Setting `--edge_bias 0` disables biasing and reverts to pure area-weighted uniform sampling.
-
 ### Output Format
 
 Each instance produces `udf/{sha256}.npz` containing:
@@ -196,22 +163,14 @@ Each instance produces `udf/{sha256}.npz` containing:
 | `offset` | [3] | float32 | Centroid offset applied during normalization |
 | `num_edges` | [1] | int32 | Number of B-Rep edges found |
 
-### UDF Value Interpretation
-
-- **UDF = 0**: Point lies exactly on a B-Rep edge
-- **UDF = 1**: Point is one voxel width (1/256 at default resolution) from the nearest edge
-- **UDF > 1**: Point is farther from edges (interior of faces)
-
-Typical ranges: min is always 0 (at edge vertices), max varies by geometry (10–70+ voxel widths for large flat faces).
-
 ## Dataset Directory Structure
 
-After full processing, `datasets/STEPFiles/` contains:
+After full processing, `datasets/ParasolidFiles/` contains:
 
 ```
-datasets/STEPFiles/
+datasets/ParasolidFiles/
 ├── metadata.csv                     # Master index
-├── raw/                             # Symlinked source STEP files
+├── raw/                             # Symlinked source Parasolid files
 ├── meshes/                          # Normalized OBJ meshes
 ├── udf/                             # Surface points + UDF ground truth (.npz)
 ├── renders/                         # Multiview rendered images
@@ -220,13 +179,3 @@ datasets/STEPFiles/
 └── latents/                         # Encoded SLat latents
     └── dinov2_vitl14_reg_slat_enc_swin8_B_64l8_fp16/
 ```
-
-## Current Dataset
-
-3 STEP file instances:
-
-| Instance | Voxels | B-Rep Edges | Source |
-|----------|--------|-------------|--------|
-| aisin_part | 3,971 | ~200+ | Aisin automotive part |
-| hook | 12,128 | ~100+ | Hook geometry |
-| part | 7,151 | ~150+ | Generic mechanical part |
