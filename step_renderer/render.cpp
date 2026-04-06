@@ -183,9 +183,12 @@ void RenderView(Handle(V3d_View)& view, const View& v,
     view->Camera()->SetProjectionType(Graphic3d_Camera::Projection_Perspective);
     view->Camera()->SetFOVy(v.fov * 180.0 / M_PI);
 
-    // Compute eye position on sphere using same convention as render_step.py
+    // Compute eye position on sphere.
+    // OCCT's camera uses SideRight = -(Direction × Up), opposite to OpenGL's
+    // (forward × up). This mirrors the image horizontally. We negate Y to
+    // compensate, so the rendered image matches the standard convention.
     double ex = v.radius * cos(v.yaw) * cos(v.pitch);
-    double ey = v.radius * sin(v.yaw) * cos(v.pitch);
+    double ey = -v.radius * sin(v.yaw) * cos(v.pitch);
     double ez = v.radius * sin(v.pitch);
     view->SetEye(ex, ey, ez);
     view->SetAt(0, 0, 0);
@@ -193,7 +196,7 @@ void RenderView(Handle(V3d_View)& view, const View& v,
     // Up vector: world Z, unless looking straight up/down
     if (std::abs(cos(v.pitch)) < 1e-6) {
         view->SetUp(-cos(v.yaw) * (v.pitch > 0 ? 1.0 : -1.0),
-                     -sin(v.yaw) * (v.pitch > 0 ? 1.0 : -1.0), 0);
+                     sin(v.yaw) * (v.pitch > 0 ? 1.0 : -1.0), 0);
     } else {
         view->SetUp(0, 0, 1);
     }
