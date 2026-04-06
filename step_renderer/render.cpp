@@ -34,7 +34,13 @@
 #include <Image_AlienPixMap.hxx>
 #include <Quantity_Color.hxx>
 #include <Quantity_ColorRGBA.hxx>
+#include <Aspect_NeutralWindow.hxx>
+#ifdef __APPLE__
+#include <Cocoa_Window.hxx>
+extern "C" void macos_init_app();
+#else
 #include <Xw_Window.hxx>
+#endif
 
 struct View {
     double yaw, pitch, radius, fov;
@@ -274,40 +280,55 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+#ifdef __APPLE__
+    macos_init_app();
+#endif
+    // std::cerr << "DBG:init NSApp" << std::endl;
     Handle(Aspect_DisplayConnection) disp = new Aspect_DisplayConnection();
+    // std::cerr << "DBG:display conn" << std::endl;
     Handle(OpenGl_GraphicDriver) driver = new OpenGl_GraphicDriver(disp);
+    // std::cerr << "DBG:driver" << std::endl;
     Handle(V3d_Viewer) viewer = new V3d_Viewer(driver);
+    // std::cerr << "DBG:viewer" << std::endl;
     Handle(V3d_View) view = viewer->CreateView();
+    // std::cerr << "DBG:view" << std::endl;
     Handle(AIS_InteractiveContext) context = new AIS_InteractiveContext(viewer);
+    // std::cerr << "DBG:context" << std::endl;
 
     Handle(V3d_DirectionalLight) light = new V3d_DirectionalLight(V3d_Zneg, Quantity_NOC_WHITE, Standard_True);
     viewer->AddLight(light);
     viewer->SetLightOn();
+    // std::cerr << "DBG:light" << std::endl;
 
+#ifdef __APPLE__
+    Handle(Cocoa_Window) win = new Cocoa_Window("Render", 0, 0, 1024, 1024);
+#else
     Handle(Xw_Window) win = new Xw_Window(disp, "Render", 0, 0, 1024, 1024);
+#endif
+    // std::cerr << "DBG:window created" << std::endl;
     win->SetVirtual(Standard_True);
-    win->Map();
     view->SetWindow(win);
+    // std::cerr << "DBG:window set" << std::endl;
 
     Quantity_Color bgColor(1.0, 0.0, 1.0, Quantity_TOC_RGB);
     view->SetBackgroundColor(bgColor);
+    // std::cerr << "DBG:bg color" << std::endl;
 
     Handle(AIS_Shape) aisShape = new AIS_Shape(shape);
     aisShape->SetDisplayMode(AIS_Shaded);
+    // std::cerr << "DBG:ais shape" << std::endl;
 
-    // Disable iso-lines
+    // Disable iso-lines (UIsoAspect/VIsoAspect crash on OCCT 7.9 macOS)
+    // std::cerr << "DBG:setting iso" << std::endl;
     aisShape->Attributes()->SetIsoOnTriangulation(Standard_False);
     aisShape->Attributes()->SetIsoOnPlane(Standard_False);
-    aisShape->Attributes()->UIsoAspect()->SetNumber(0);
-    aisShape->Attributes()->VIsoAspect()->SetNumber(0);
 
-    // Draw face boundary edges (B-Rep edges). Some ABC dataset STEP files
-    // have edge curves whose parametric extent goes beyond trim bounds,
-    // which can produce stray lines. External normalization + fixed camera
-    // mitigates the visual impact, and edges are needed by the TRELLIS encoder.
+    // std::cerr << "DBG:setting face boundary" << std::endl;
     aisShape->Attributes()->SetFaceBoundaryDraw(Standard_True);
 
+    // std::cerr << "DBG:displaying" << std::endl;
     context->Display(aisShape, Standard_False);
+    // std::cerr << "DBG:displayed" << std::endl;
 
     for (size_t i = 0; i < views.size(); ++i) {
         std::cout << "[" << (i + 1) << "/" << views.size() << "] ";
