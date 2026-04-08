@@ -8,9 +8,9 @@ Uses NMR's built-in offscreen renderer (Qt OpenGL) which:
   - Renders with Phong shading, MSAA, geometry-shader thick edges
   - Auto-fits camera to bounding sphere (perspective projection, FOV 40°)
 
-CLI (same interface as step_renderer):
+CLI:
     python parasolid_renderer.py \\
-        --object   path/to/part.x_t \\
+        --object   part1.x_t [part2.x_t ...] \\
         --views    path/to/views.json \\
         [--output_dir /path/to/dataset/dir] \\
         [--width 512] [--height 512]
@@ -34,7 +34,7 @@ import math
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument('--object',     required=True, help='Path to .x_t file')
+    p.add_argument('--object',     required=True, nargs='+', help='Path to .x_t file(s)')
     p.add_argument('--views',      required=True, help='Path to views.json')
     p.add_argument('--output_dir', default=None,
                    help='Dataset root (accepted for compatibility, not used)')
@@ -120,11 +120,12 @@ def trellis_to_nmr_camera(yaw, pitch):
 
 def main():
     args = parse_args()
-    xt_path = os.path.abspath(args.object)
+    xt_paths = [os.path.abspath(p) for p in args.object]
 
-    if not os.path.exists(xt_path):
-        print(f"Error: not found: {xt_path}", file=sys.stderr)
-        sys.exit(1)
+    for p in xt_paths:
+        if not os.path.exists(p):
+            print(f"Error: not found: {p}", file=sys.stderr)
+            sys.exit(1)
 
     nmr_bin = _find_nmr()
     if nmr_bin is None:
@@ -163,7 +164,7 @@ def main():
         env['DYLD_LIBRARY_PATH'] = dyld
 
     cmd = [
-        nmr_bin, '--snapshot', xt_path,
+        nmr_bin, '--snapshot'] + xt_paths + [
         '--presets', presets_path,
         '--perspective', '--fov', '40',
         '--edges',
@@ -177,7 +178,7 @@ def main():
     ]
 
     print(f"nmr:   {nmr_bin}", file=sys.stderr)
-    print(f"input: {xt_path}", file=sys.stderr)
+    print(f"input: {len(xt_paths)} file(s)", file=sys.stderr)
     print(f"views: {len(views)}", file=sys.stderr)
 
     result = subprocess.run(cmd, env=env, capture_output=True, text=True)
