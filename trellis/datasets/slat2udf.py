@@ -45,6 +45,7 @@ class SLat2UDF(StandardDatasetBase):
         max_num_voxels: int = 32768,
         augment_points: bool = True,
         exclude_instances: list = None,
+        include_instances: list = None,
     ):
         self.latent_model = latent_model
         self.num_surface_points = num_surface_points
@@ -52,6 +53,7 @@ class SLat2UDF(StandardDatasetBase):
         self.max_num_voxels = max_num_voxels
         self.augment_points = augment_points
         self.exclude_instances = exclude_instances or []
+        self.include_instances = include_instances or []
         
         super().__init__(roots)
         
@@ -61,8 +63,11 @@ class SLat2UDF(StandardDatasetBase):
     def filter_metadata(self, metadata):
         stats = {}
         
-        # Exclude holdout instances
-        if self.exclude_instances:
+        # Include/exclude instance filtering
+        if self.include_instances:
+            metadata = metadata[metadata['sha256'].isin(self.include_instances)]
+            stats['After include filter'] = len(metadata)
+        elif self.exclude_instances:
             metadata = metadata[~metadata['sha256'].isin(self.exclude_instances)]
             stats['After holdout exclusion'] = len(metadata)
         
