@@ -6,7 +6,7 @@ Uses NMR's built-in offscreen renderer (Qt OpenGL) which:
   - Loads .x_t files directly via Parasolid
   - Samples actual B-Rep curves (PK_CURVE_eval) for smooth edge lines
   - Renders with Phong shading, MSAA, geometry-shader thick edges
-  - Auto-fits camera to bounding sphere (orthographic projection)
+  - Auto-fits camera to bounding sphere (perspective projection, FOV 40°)
 
 CLI (same interface as step_renderer):
     python parasolid_renderer.py \\
@@ -92,22 +92,27 @@ def _nmr_presets_file():
 
 def trellis_to_nmr_camera(yaw, pitch):
     """
-    Convert TRELLIS spherical camera (yaw, pitch in radians) to NMR orbit
-    camera (rotX, rotY in degrees).
+    Convert TRELLIS spherical camera (yaw, pitch in radians) to NMR lookAt
+    camera preset.
 
-    TRELLIS:
+    TRELLIS places the camera on a sphere looking at the origin:
         eye = (r*cos(yaw)*cos(pitch), r*sin(yaw)*cos(pitch), r*sin(pitch))
-        Z-up, perspective projection
+        Z-up, perspective projection, FOV 40°
 
-    NMR orbit camera (from view matrix analysis):
-        cam_pos = (-d*cos(A)*sin(B), -d*cos(A)*cos(B), d*sin(A))
-        where A=rotX (rad), B=rotY (rad)
-
-    Matching:  rotX = pitch,  rotY = -(yaw + π/2)
+    NMR lookAt mode uses eyeDirX/Y/Z (unit vector from target to eye),
+    distance, and upX/Y/Z.
     """
-    rotX = math.degrees(pitch)
-    rotY = -math.degrees(yaw) - 90.0
-    return rotX, rotY
+    dx = math.cos(yaw) * math.cos(pitch)
+    dy = math.sin(yaw) * math.cos(pitch)
+    dz = math.sin(pitch)
+    return {
+        "eyeDirX": dx,
+        "eyeDirY": dy,
+        "eyeDirZ": dz,
+        "upX": 0.0,
+        "upY": 0.0,
+        "upZ": 1.0,
+    }
 
 # ---------------------------------------------------------------------------
 # Main
@@ -135,15 +140,12 @@ def main():
         print("Error: views.json is empty", file=sys.stderr)
         sys.exit(1)
 
-    # Build NMR presets from TRELLIS views
+    # Build NMR presets from TRELLIS views (lookAt mode)
     presets = []
     for i, v in enumerate(views):
-        rotX, rotY = trellis_to_nmr_camera(v['yaw'], v['pitch'])
-        presets.append({
-            "name": f"{i:04d}",
-            "rotX": rotX,
-            "rotY": rotY,
-        })
+        preset = trellis_to_nmr_camera(v['yaw'], v['pitch'])
+        preset["name"] = f"{i:04d}"
+        presets.append(preset)
 
     # Write temporary presets file
     tmpdir = tempfile.mkdtemp(prefix='parasolid_render_')
@@ -163,6 +165,7 @@ def main():
     cmd = [
         nmr_bin, '--snapshot', xt_path,
         '--presets', presets_path,
+        '--perspective', '--fov', '40',
         '--edges',
         '--no-burn-in',
         '--transparent',
