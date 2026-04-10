@@ -92,6 +92,8 @@ if __name__ == '__main__':
     if 'cond_rendered' not in metadata.columns:
         metadata['cond_rendered'] = [False] * len(metadata)
     # UDF-specific columns (for Parasolid CAD dataset)
+    if 'has_converted' not in metadata.columns:
+        metadata['has_converted'] = [False] * len(metadata)
     if 'has_mesh' not in metadata.columns:
         metadata['has_mesh'] = [False] * len(metadata)
     if 'has_udf' not in metadata.columns:
@@ -107,7 +109,7 @@ if __name__ == '__main__':
             metadata[f'ss_latent_{model}'] = [False] * len(metadata)
 
     # Fill NaN with False for all boolean columns (CSV round-trip loses False→NaN)
-    bool_cols = ['rendered', 'voxelized', 'cond_rendered', 'has_mesh', 'has_udf']
+    bool_cols = ['rendered', 'voxelized', 'cond_rendered', 'has_converted', 'has_mesh', 'has_udf']
     bool_cols += [f'feature_{m}' for m in image_models]
     bool_cols += [f'latent_{m}' for m in latent_models]
     bool_cols += [f'ss_latent_{m}' for m in ss_latent_models]
@@ -115,6 +117,21 @@ if __name__ == '__main__':
         if col in metadata.columns:
             metadata[col] = metadata[col].fillna(False)
     
+    # merge converted (Parasolid NMR conversion)
+    df_files = [f for f in os.listdir(opt.output_dir) if f.startswith('converted_') and f.endswith('.csv')]
+    df_parts = []
+    for f in df_files:
+        try:
+            df_parts.append(pd.read_csv(os.path.join(opt.output_dir, f)))
+        except:
+            pass
+    if len(df_parts) > 0:
+        df = pd.concat(df_parts)
+        df.set_index('sha256', inplace=True)
+        metadata.update(df, overwrite=True)
+        for f in df_files:
+            shutil.move(os.path.join(opt.output_dir, f), os.path.join(opt.output_dir, 'merged_records', f'{timestamp}_{f}'))
+
     # merge step_processed (Parasolid CAD dataset)
     df_files = [f for f in os.listdir(opt.output_dir) if f.startswith('step_processed_') and f.endswith('.csv')]
     df_parts = []
@@ -244,7 +261,10 @@ if __name__ == '__main__':
             tqdm(total=len(metadata), desc="Building metadata") as pbar:
             def worker(sha256):
                 try:
-                    # Check for Parasolid preprocessing (mesh + UDF)
+                    # Check for Parasolid preprocessing (convert + mesh + UDF)
+                    if need_process('has_converted') and metadata.loc[sha256, 'has_converted'] == False and \
+                        os.path.exists(os.path.join(opt.output_dir, 'converted', f'{sha256}.npz')):
+                        metadata.loc[sha256, 'has_converted'] = True
                     if need_process('has_mesh') and metadata.loc[sha256, 'has_mesh'] == False and \
                         os.path.exists(os.path.join(opt.output_dir, 'meshes', f'{sha256}.obj')):
                         metadata.loc[sha256, 'has_mesh'] = True
@@ -294,7 +314,7 @@ if __name__ == '__main__':
             executor.shutdown(wait=True)
 
     # Ensure boolean columns are proper bool before saving (prevents NaN on CSV round-trip)
-    bool_save_cols = ['rendered', 'voxelized', 'cond_rendered', 'has_mesh', 'has_udf']
+    bool_save_cols = ['rendered', 'voxelized', 'cond_rendered', 'has_converted', 'has_mesh', 'has_udf']
     bool_save_cols += [f'feature_{m}' for m in image_models]
     bool_save_cols += [f'latent_{m}' for m in latent_models]
     bool_save_cols += [f'ss_latent_{m}' for m in ss_latent_models]
@@ -310,6 +330,8 @@ if __name__ == '__main__':
         f.write(f'  - Number of assets: {len(metadata)}\n')
         f.write(f'  - Number of assets downloaded: {num_downloaded}\n')
         # Parasolid/UDF-specific stats
+        if 'has_converted' in metadata.columns:
+            f.write(f'  - Number of assets converted (NMR): {metadata["has_converted"].sum()}\n')
         if 'has_mesh' in metadata.columns:
             f.write(f'  - Number of assets with mesh: {metadata["has_mesh"].sum()}\n')
         if 'has_udf' in metadata.columns:

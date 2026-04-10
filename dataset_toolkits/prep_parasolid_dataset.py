@@ -2,23 +2,23 @@
 """
 Prepare Parasolid files for TRELLIS UDF decoder training.
 
-This script is Stage 2 of a two-stage pipeline:
-  Stage 1 (external): nmr --convert input.x_t -o {sha256}.npz
-                       Produces a deduplicated triangle mesh with B-Rep edge
-                       vertices identified (arrays: vertices, faces, edge_vertices).
-  Stage 2 (this script): Loads Stage-1 NPZs, normalizes the mesh, computes
-                          geodesic UDF via the heat method, samples surface
-                          points, and saves the output format expected by
-                          the SLat2UDF dataset class.
+Two pipeline steps, both tracked in metadata.csv:
 
-Output per instance:
-  meshes/{sha256}.obj   — Normalized triangulated mesh in [-0.5, 0.5]^3
-  udf/{sha256}.npz      — Surface points with ground-truth UDF values
+  1. Convert: x_t → converted/{sha256}.npz  (has_converted=True)
+     Runs NMR with --tess-max-width to produce a triangle mesh with
+     B-Rep edge vertices identified.
+
+  2. UDF: converted NPZ → meshes/{sha256}.obj + udf/{sha256}.npz  (has_mesh=True, has_udf=True)
+     Normalizes mesh, computes geodesic UDF via heat method, samples
+     surface points.
 
 Usage:
     python prep_parasolid_dataset.py ParasolidFiles \
-        --npz_dir /path/to/parasolid_npz \
+        --source_dir /path/to/x_t_files \
         --output_dir datasets/ParasolidFiles
+
+Both steps run in one invocation. Already-completed instances are skipped
+based on filesystem checks.
 """
 
 import os
@@ -26,6 +26,7 @@ import sys
 import importlib
 import argparse
 import copy
+import subprocess
 import numpy as np
 import pandas as pd
 from easydict import EasyDict as edict
@@ -34,11 +35,11 @@ from tqdm import tqdm
 
 
 # ---------------------------------------------------------------------------
-# Per-instance processing
+# Step 1: NMR conversion (x_t → NPZ)
 # ---------------------------------------------------------------------------
 
 def find_nmr_binary():
-    """Locate the NMR binary and Parasolid shared libraries."""
+    """Locate the NMR binary."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
     candidates = [
         os.path.join(script_dir, '..', '..', 'nmr', 'build', 'nmr-server'),
@@ -66,34 +67,83 @@ def find_parasolid_dyld():
     return None
 
 
-def convert_xt_to_npz(xt_path, npz_path, tess_max_width=0.02):
-    """
-    Convert a single x_t file to NPZ via NMR.
+def convert_one(xt_path, npz_path, nmr_bin, env, tess_max_width):
+    """Convert a single x_t file to NPZ via NMR."""
+    cmd = [nmr_bin, '--convert', xt_path,
+           '--tess-max-width', str(tess_max_width), '-o', npz_path]
+    result = subprocess.run(cmd, env=env, capture_output=True, text=True)
+    if result.returncode != 0:
+        return None, result.stderr.strip()
+    return npz_path, None
 
-    Args:
-        xt_path: path to .x_t file
-        npz_path: output .npz path
-        tess_max_width: max facet width for tessellation (critical for edge
-            vertex quality — coarse tessellation marks nearly all vertices
-            as edge vertices)
+
+def run_convert_step(metadata, output_dir, tess_max_width):
     """
-    import subprocess
+    Step 1: Convert x_t files to NPZ via NMR.
+
+    Reads raw/{sha256}.x_t, writes converted/{sha256}.npz.
+    Skips instances that already have a converted NPZ.
+    """
+    converted_dir = os.path.join(output_dir, 'converted')
+    os.makedirs(converted_dir, exist_ok=True)
 
     nmr_bin = find_nmr_binary()
     if not nmr_bin:
-        raise RuntimeError('NMR binary not found. Set NMR_BIN env var.')
+        print('WARNING: NMR binary not found (set NMR_BIN env var). Skipping conversion.')
+        return []
 
     env = dict(os.environ)
     dyld = find_parasolid_dyld()
     if dyld:
         env['DYLD_LIBRARY_PATH'] = dyld
 
-    cmd = [nmr_bin, '--convert', xt_path, '--tess-max-width', str(tess_max_width), '-o', npz_path]
-    result = subprocess.run(cmd, env=env, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(f'NMR convert failed: {result.stderr}')
-    return npz_path
+    to_convert = []
+    already_done = []
+    for _, row in metadata.iterrows():
+        sha256 = row['sha256']
+        npz_path = os.path.join(converted_dir, f'{sha256}.npz')
+        if os.path.exists(npz_path):
+            already_done.append({'sha256': sha256, 'has_converted': True})
+            continue
 
+        # Find the x_t source
+        raw_xt = os.path.join(output_dir, 'raw', f'{sha256}.x_t')
+        if not os.path.exists(raw_xt):
+            source_path = row.get('source_path', '')
+            if source_path and os.path.exists(source_path):
+                raw_xt = source_path
+            else:
+                print(f'  No x_t file for {sha256}')
+                continue
+
+        to_convert.append((sha256, raw_xt, npz_path))
+
+    if not to_convert:
+        print(f'Convert: {len(already_done)} already done, 0 to convert')
+        return already_done
+
+    print(f'Convert: {len(already_done)} already done, {len(to_convert)} to convert '
+          f'(--tess-max-width {tess_max_width})')
+
+    records = list(already_done)
+    n_ok = 0
+    n_fail = 0
+    for sha256, xt_path, npz_path in tqdm(to_convert, desc='Converting x_t → NPZ'):
+        result_path, err = convert_one(xt_path, npz_path, nmr_bin, env, tess_max_width)
+        if result_path:
+            records.append({'sha256': sha256, 'has_converted': True})
+            n_ok += 1
+        else:
+            print(f'  Convert failed for {sha256}: {err}')
+            n_fail += 1
+
+    print(f'  Converted {n_ok}, failed {n_fail}')
+    return records
+
+
+# ---------------------------------------------------------------------------
+# Step 2: UDF computation (NPZ → mesh + UDF)
+# ---------------------------------------------------------------------------
 
 def load_parasolid_npz(npz_path):
     """
@@ -105,38 +155,28 @@ def load_parasolid_npz(npz_path):
         edge_vertices: np.ndarray [E]    int32  (indices of B-Rep edge verts)
     """
     data = np.load(npz_path)
-    vertices = data['vertices']          # [V, 3] float64
-    faces = data['faces']                # [F, 3] int32
-    edge_vertices = data['edge_vertices']  # [E]  int32
+    vertices = data['vertices']
+    faces = data['faces']
+    edge_vertices = data['edge_vertices']
 
-    # Warn if edge vertex ratio is suspiciously high (likely coarse tessellation)
+    # Warn if edge vertex ratio is suspiciously high (coarse tessellation)
     n_unique = len(set(edge_vertices.tolist())) if len(edge_vertices) > 0 else 0
     n_verts = vertices.shape[0]
     if n_verts > 0 and n_unique / n_verts > 0.5:
         print(f"  WARNING: {n_unique}/{n_verts} ({100*n_unique/n_verts:.0f}%) vertices "
-              f"marked as edge vertices — tessellation may be too coarse. "
-              f"Re-run NMR with --tess-max-width 0.02")
+              f"are edge vertices — tessellation is too coarse.")
 
     return vertices, faces, edge_vertices
 
 
 def normalize_mesh(vertices, faces):
-    """
-    Normalize mesh to [-0.5, 0.5]^3 (TRELLIS convention).
-
-    Returns:
-        norm_vertices: np.ndarray [V, 3] float32
-        scale:         float
-        offset:        np.ndarray [3] float64  (original centroid)
-    """
+    """Normalize mesh to [-0.5, 0.5]^3 (TRELLIS convention)."""
     verts = vertices.copy()
     centroid = (verts.max(axis=0) + verts.min(axis=0)) / 2.0
     verts -= centroid
-
     max_extent = np.abs(verts).max()
     scale = (0.5 / max_extent * 0.95) if max_extent > 0 else 1.0
     verts *= scale
-
     return verts.astype(np.float32), float(scale), centroid
 
 
@@ -144,8 +184,6 @@ def compute_geodesic_udf(vertices, faces, edge_vertex_indices):
     """
     Compute geodesic distance from each mesh vertex to the nearest B-Rep
     edge vertex using the heat method (potpourri3d).
-
-    Returns per-vertex UDF values (float32, ≥ 0).
     """
     import potpourri3d as pp3d
 
@@ -156,7 +194,6 @@ def compute_geodesic_udf(vertices, faces, edge_vertex_indices):
     source_verts = np.array(sorted(set(edge_vertex_indices.tolist())), dtype=np.int32)
     solver = pp3d.MeshHeatMethodDistanceSolver(vertices, faces)
     dist = solver.compute_distance_multisource(source_verts)
-    # Clamp: heat method can produce tiny negatives at source vertices
     return np.maximum(dist, 0.0).astype(np.float32)
 
 
@@ -164,14 +201,8 @@ def sample_surface_with_udf(vertices, faces, vertex_udf,
                              n_samples, edge_bias=0.5, edge_threshold=2.0):
     """
     Sample points on the mesh surface with interpolated UDF values.
-    Uses edge-biased sampling so that near-edge regions (low UDF) get
-    denser supervision.
-
-    Returns:
-        points: [n_samples, 3] float32
-        udf:    [n_samples]    float32
+    Uses edge-biased sampling so that near-edge regions get denser supervision.
     """
-    # Per-face area (cross-product method)
     v0 = vertices[faces[:, 0]]
     v1 = vertices[faces[:, 1]]
     v2 = vertices[faces[:, 2]]
@@ -181,7 +212,6 @@ def sample_surface_with_udf(vertices, faces, vertex_udf,
     if total_area <= 0:
         total_area = 1.0
 
-    # Per-face mean UDF
     face_mean_udf = vertex_udf[faces].mean(axis=1)
     near_edge_mask = face_mean_udf < edge_threshold
     n_near_edge = near_edge_mask.sum()
@@ -190,56 +220,46 @@ def sample_surface_with_udf(vertices, faces, vertex_udf,
         n_edge_samples    = int(n_samples * edge_bias)
         n_uniform_samples = n_samples - n_edge_samples
 
-        # Near-edge: area-weighted over near-edge faces only
         edge_areas = areas.copy()
         edge_areas[~near_edge_mask] = 0.0
         edge_probs = edge_areas / edge_areas.sum()
         edge_tri_indices = np.random.choice(len(faces), size=n_edge_samples, p=edge_probs)
 
-        # Uniform: area-weighted over all faces
         uniform_probs = areas / total_area
         uniform_tri_indices = np.random.choice(len(faces), size=n_uniform_samples,
                                                p=uniform_probs)
 
         tri_indices = np.concatenate([edge_tri_indices, uniform_tri_indices])
-        print(f"  Edge-biased sampling: {n_near_edge}/{len(faces)} near-edge faces "
-              f"({n_edge_samples} edge + {n_uniform_samples} uniform = {n_samples} total)")
     else:
         uniform_probs = areas / total_area
         tri_indices = np.random.choice(len(faces), size=n_samples, p=uniform_probs)
-        if n_near_edge == 0:
-            print(f"  Warning: no near-edge faces (threshold={edge_threshold}), "
-                  f"using uniform sampling")
 
-    # Barycentric coordinates
     u = np.random.uniform(0, 1, n_samples)
     v = np.random.uniform(0, 1, n_samples)
     mask = u + v > 1
     u[mask] = 1 - u[mask]
     v[mask] = 1 - v[mask]
     w = 1 - u - v
-    bary = np.stack([u, v, w], axis=1)  # [N, 3]
+    bary = np.stack([u, v, w], axis=1)
 
-    tri_verts = vertices[faces[tri_indices]]              # [N, 3, 3]
-    points = np.einsum('ijk,ij->ik', tri_verts, bary)    # [N, 3]
+    tri_verts = vertices[faces[tri_indices]]
+    points = np.einsum('ijk,ij->ik', tri_verts, bary)
 
-    corner_udf = vertex_udf[faces[tri_indices]]           # [N, 3]
-    udf = np.einsum('ij,ij->i', corner_udf, bary)        # [N]
+    corner_udf = vertex_udf[faces[tri_indices]]
+    udf = np.einsum('ij,ij->i', corner_udf, bary)
 
     perm = np.random.permutation(n_samples)
     return points[perm].astype(np.float32), udf[perm].astype(np.float32)
 
 
-def _process_instance(npz_path, sha256, output_dir,
-                      num_samples, resolution=256,
-                      edge_bias=0.5, edge_threshold=2.0):
-    """Process a single Parasolid NPZ file."""
+def _process_udf(npz_path, sha256, output_dir,
+                  num_samples, resolution=256,
+                  edge_bias=0.5, edge_threshold=2.0):
+    """Compute UDF for a single converted NPZ."""
     import trimesh
 
-    mesh_dir = os.path.join(output_dir, 'meshes')
-    udf_dir  = os.path.join(output_dir, 'udf')
-    mesh_path = os.path.join(mesh_dir, f'{sha256}.obj')
-    udf_path  = os.path.join(udf_dir,  f'{sha256}.npz')
+    mesh_path = os.path.join(output_dir, 'meshes', f'{sha256}.obj')
+    udf_path  = os.path.join(output_dir, 'udf',    f'{sha256}.npz')
 
     if os.path.exists(mesh_path) and os.path.exists(udf_path):
         return {'sha256': sha256, 'has_mesh': True, 'has_udf': True}
@@ -251,21 +271,16 @@ def _process_instance(npz_path, sha256, output_dir,
             print(f"  Warning: no faces in {sha256}")
             return None
 
-        # Normalize to [-0.5, 0.5]^3
         norm_verts, scale, offset = normalize_mesh(vertices, faces)
 
-        # Save OBJ mesh
         mesh_obj = trimesh.Trimesh(vertices=norm_verts, faces=faces, process=False)
         mesh_obj.export(mesh_path)
 
-        # Compute geodesic UDF on the normalized mesh
         vertex_udf = compute_geodesic_udf(norm_verts, faces, edge_vertices)
 
-        # Normalize UDF by voxel size: UDF=1.0 means one voxel width from nearest edge
         voxel_size = 1.0 / resolution
         norm_udf = vertex_udf / voxel_size
 
-        # Adaptive sample count: scale with mesh complexity
         n_faces = len(faces)
         if num_samples == 100000:
             adaptive_samples = max(50000, min(1500000, n_faces * 5))
@@ -302,8 +317,8 @@ def _process_instance(npz_path, sha256, output_dir,
         return None
 
 
-def _worker_fn(args):
-    return _process_instance(
+def _udf_worker(args):
+    return _process_udf(
         npz_path=args['npz_path'],
         sha256=args['sha256'],
         output_dir=args['output_dir'],
@@ -312,6 +327,68 @@ def _worker_fn(args):
         edge_bias=args['edge_bias'],
         edge_threshold=args['edge_threshold'],
     )
+
+
+def run_udf_step(metadata, output_dir, num_samples, resolution,
+                  edge_bias, edge_threshold, max_workers):
+    """
+    Step 2: Compute UDF from converted NPZs.
+
+    Reads converted/{sha256}.npz, writes meshes/{sha256}.obj + udf/{sha256}.npz.
+    Skips instances that already have mesh + UDF.
+    """
+    converted_dir = os.path.join(output_dir, 'converted')
+    os.makedirs(os.path.join(output_dir, 'meshes'), exist_ok=True)
+    os.makedirs(os.path.join(output_dir, 'udf'),    exist_ok=True)
+
+    work_items = []
+    already_done = []
+    skipped = 0
+    for _, row in metadata.iterrows():
+        sha256 = row['sha256']
+
+        mesh_path = os.path.join(output_dir, 'meshes', f'{sha256}.obj')
+        udf_path  = os.path.join(output_dir, 'udf',    f'{sha256}.npz')
+        if os.path.exists(mesh_path) and os.path.exists(udf_path):
+            already_done.append({'sha256': sha256, 'has_mesh': True, 'has_udf': True})
+            continue
+
+        npz_path = os.path.join(converted_dir, f'{sha256}.npz')
+        if not os.path.exists(npz_path):
+            skipped += 1
+            continue
+
+        work_items.append({
+            'npz_path':     npz_path,
+            'sha256':       sha256,
+            'output_dir':   output_dir,
+            'num_samples':  num_samples,
+            'resolution':   resolution,
+            'edge_bias':    edge_bias,
+            'edge_threshold': edge_threshold,
+        })
+
+    print(f'UDF: {len(already_done)} already done, {len(work_items)} to process'
+          + (f', {skipped} skipped (no converted NPZ)' if skipped else ''))
+
+    if not work_items:
+        return already_done
+
+    n_workers = min(max_workers, len(work_items))
+    processed = []
+    if n_workers <= 1:
+        for item in tqdm(work_items, desc='Computing UDF'):
+            rec = _udf_worker(item)
+            if rec is not None:
+                processed.append(rec)
+    else:
+        with Pool(processes=n_workers) as pool:
+            for rec in tqdm(pool.imap_unordered(_udf_worker, work_items),
+                            total=len(work_items), desc='Computing UDF'):
+                if rec is not None:
+                    processed.append(rec)
+
+    return already_done + processed
 
 
 # ---------------------------------------------------------------------------
@@ -324,14 +401,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--output_dir', type=str, required=True,
                         help='Directory to save processed data')
-    parser.add_argument('--npz_dir', type=str, default=None,
-                        help='Directory containing Parasolid NPZ files '
-                             '(output of "nmr --convert input.x_t --tess-max-width 0.02 -o {sha256}.npz"). '
-                             'If a file is missing, NMR will be invoked automatically.')
     parser.add_argument('--tess_max_width', type=float, default=0.02,
-                        help='Max facet width for NMR tessellation (default 0.02). '
-                             'IMPORTANT: coarse tessellation (default NMR) marks nearly '
-                             'all vertices as edge vertices, producing garbage UDF.')
+                        help='Max facet width for NMR tessellation (default 0.02)')
     parser.add_argument('--num_samples', type=int, default=100000,
                         help='Number of surface points to sample for UDF')
     parser.add_argument('--resolution', type=int, default=256,
@@ -349,9 +420,6 @@ if __name__ == '__main__':
     dataset_utils.add_args(parser)
     opt = parser.parse_args(sys.argv[2:])
     opt = edict(vars(opt))
-
-    os.makedirs(os.path.join(opt.output_dir, 'meshes'), exist_ok=True)
-    os.makedirs(os.path.join(opt.output_dir, 'udf'),    exist_ok=True)
 
     metadata_path = os.path.join(opt.output_dir, 'metadata.csv')
 
@@ -396,94 +464,22 @@ if __name__ == '__main__':
     end   = len(metadata) * (opt.rank + 1) // opt.world_size
     metadata = metadata[start:end]
 
-    # Skip already-processed
-    records = []
-    for sha256 in copy.copy(metadata['sha256'].values):
-        mesh_path = os.path.join(opt.output_dir, 'meshes', f'{sha256}.obj')
-        udf_path  = os.path.join(opt.output_dir, 'udf',    f'{sha256}.npz')
-        if os.path.exists(mesh_path) and os.path.exists(udf_path):
-            records.append({'sha256': sha256, 'has_mesh': True, 'has_udf': True})
-            metadata = metadata[metadata['sha256'] != sha256]
+    # Step 1: Convert x_t → NPZ
+    convert_records = run_convert_step(metadata, opt.output_dir, opt.tess_max_width)
 
-    # Build work items — locate or generate Parasolid NPZ for each instance
-    npz_dir = opt.npz_dir
-    npz_gen_dir = os.path.join(opt.output_dir, 'npz_converted')
-    work_items = []
-    skipped_missing = 0
-    n_converted = 0
-    for _, row in metadata.iterrows():
-        sha256 = row['sha256']
+    # Step 2: Compute UDF from converted NPZs
+    udf_records = run_udf_step(
+        metadata, opt.output_dir,
+        num_samples=opt.num_samples, resolution=opt.resolution,
+        edge_bias=opt.edge_bias, edge_threshold=opt.edge_threshold,
+        max_workers=opt.max_workers)
 
-        # Look for {sha256}.npz in the npz_dir
-        npz_path = None
-        if npz_dir:
-            npz_path = os.path.join(npz_dir, f'{sha256}.npz')
-            if not os.path.exists(npz_path):
-                npz_path = None
+    # Save progress CSVs for build_metadata.py to merge
+    if convert_records:
+        pd.DataFrame.from_records(convert_records).to_csv(
+            os.path.join(opt.output_dir, f'converted_{opt.rank}.csv'), index=False)
+    if udf_records:
+        pd.DataFrame.from_records(udf_records).to_csv(
+            os.path.join(opt.output_dir, f'step_processed_{opt.rank}.csv'), index=False)
 
-        # If no pre-built NPZ, try to convert from raw x_t file via NMR
-        if npz_path is None:
-            raw_xt = os.path.join(opt.output_dir, 'raw', f'{sha256}.x_t')
-            if not os.path.exists(raw_xt):
-                # Try source_path from metadata
-                raw_xt = row.get('source_path', '')
-            if raw_xt and os.path.exists(raw_xt):
-                os.makedirs(npz_gen_dir, exist_ok=True)
-                gen_path = os.path.join(npz_gen_dir, f'{sha256}.npz')
-                if os.path.exists(gen_path):
-                    npz_path = gen_path
-                else:
-                    try:
-                        convert_xt_to_npz(raw_xt, gen_path,
-                                          tess_max_width=opt.tess_max_width)
-                        npz_path = gen_path
-                        n_converted += 1
-                    except Exception as e:
-                        print(f"  NMR convert failed for {sha256}: {e}")
-
-        if npz_path:
-            work_items.append({
-                'npz_path':     npz_path,
-                'sha256':       sha256,
-                'output_dir':   opt.output_dir,
-                'num_samples':  opt.num_samples,
-                'resolution':   opt.resolution,
-                'edge_bias':    opt.edge_bias,
-                'edge_threshold': opt.edge_threshold,
-            })
-        else:
-            print(f"Parasolid NPZ not found for {sha256} (no npz_dir entry, no raw x_t)")
-            skipped_missing += 1
-
-    if n_converted:
-        print(f'  Converted {n_converted} x_t files via NMR (--tess-max-width {opt.tess_max_width})')
-
-    n_workers = min(opt.max_workers, len(work_items)) if work_items else 1
-    print(f'Processing {len(work_items)} instances with {n_workers} workers...')
-    if skipped_missing:
-        print(f'  Skipped {skipped_missing} instances with missing NPZ files')
-
-    processed_records = []
-    if n_workers <= 1:
-        for item in tqdm(work_items, desc='Processing'):
-            rec = _worker_fn(item)
-            if rec is not None:
-                processed_records.append(rec)
-    else:
-        with Pool(processes=n_workers) as pool:
-            for rec in tqdm(pool.imap_unordered(_worker_fn, work_items),
-                            total=len(work_items), desc='Processing'):
-                if rec is not None:
-                    processed_records.append(rec)
-
-    # Save progress CSV
-    processed = pd.DataFrame.from_records(processed_records + records)
-    processed.to_csv(
-        os.path.join(opt.output_dir, f'step_processed_{opt.rank}.csv'),
-        index=False)
-
-    n_success = len(processed_records)
-    n_skipped = len(records)
-    print(f'\nDone: {n_success} processed, {n_skipped} already existed')
-    print(f'Total in output: {len(processed)}')
-    print('Run build_metadata.py to update metadata.csv')
+    print(f'\nDone. Run build_metadata.py to update metadata.csv')
