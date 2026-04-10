@@ -36,6 +36,15 @@ Steps 1-4 are CPU-only (need Parasolid/NMR). Steps 5-6 need GPU. Step 8 needs GP
 
 ## Known Issues & Fixes
 
+### CRITICAL: NMR tessellation must use --tess-max-width 0.02
+Without `--tess-max-width`, NMR's default tessellation is very coarse (e.g., 356 vertices for a block).
+With so few vertices, nearly all of them land on B-Rep edges, producing 95-100% edge vertex ratios.
+The geodesic UDF then computes distance from *every* vertex, giving UDF ≈ 0 everywhere — garbage GT.
+
+**Fix:** `prep_parasolid_dataset.py` now auto-converts x_t files via NMR with `--tess-max-width 0.02` 
+when no pre-built NPZ is found. If using `--npz_dir`, ensure those NPZs were generated with fine tessellation.
+A warning is printed if >50% of vertices are marked as edge vertices.
+
 ### render_parasolid.py offset format bug
 Scientific notation in offset values (e.g., `-3.6e-05`) was parsed by argparse as a flag.
 **Fixed:** format offsets as `f'{value:.10f}'` instead of `str(value)`.

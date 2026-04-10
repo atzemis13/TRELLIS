@@ -37,7 +37,7 @@ def parse_args():
     p.add_argument('--data_dir', required=True, help='Dataset directory (with latents/ and metadata.csv)')
     p.add_argument('--udf_ckpt', required=True, help='Path to trained UDF decoder checkpoint (.pt)')
     p.add_argument('--udf_config', default='configs/vae/overfit5_udf.json', help='UDF decoder config')
-    p.add_argument('--mesh_model', default='microsoft/TRELLIS-image-large/ckpts/slat_dec_mesh_swin8_B_64l8_fp16',
+    p.add_argument('--mesh_model', default='microsoft/TRELLIS-image-large/ckpts/slat_dec_mesh_swin8_B_64l8m256c_fp16',
                    help='Pretrained mesh decoder (HuggingFace path or local)')
     p.add_argument('--output_dir', required=True, help='Output directory for visualizations')
     p.add_argument('--thresholds', type=float, nargs='+', default=[0.05, 0.1, 0.2, 0.5],

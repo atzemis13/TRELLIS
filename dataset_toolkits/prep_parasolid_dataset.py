@@ -37,6 +37,64 @@ from tqdm import tqdm
 # Per-instance processing
 # ---------------------------------------------------------------------------
 
+def find_nmr_binary():
+    """Locate the NMR binary and Parasolid shared libraries."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(script_dir, '..', '..', 'nmr', 'build', 'nmr-server'),
+        os.path.join(script_dir, '..', 'nmr', 'build', 'nmr-server'),
+        os.environ.get('NMR_BIN', ''),
+    ]
+    for c in candidates:
+        if c and os.path.isfile(c):
+            return os.path.abspath(c)
+    return None
+
+
+def find_parasolid_dyld():
+    """Locate the Parasolid shared libraries for DYLD_LIBRARY_PATH."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(script_dir, '..', '..', 'nmr', 'scripts', '_deps',
+                     'parasolid_37_1_180', 'parasolid', 'arm_macos', 'base', 'shared_object'),
+        os.path.join(script_dir, '..', 'nmr', 'scripts', '_deps',
+                     'parasolid_37_1_180', 'parasolid', 'arm_macos', 'base', 'shared_object'),
+    ]
+    for c in candidates:
+        if os.path.isdir(c):
+            return os.path.abspath(c)
+    return None
+
+
+def convert_xt_to_npz(xt_path, npz_path, tess_max_width=0.02):
+    """
+    Convert a single x_t file to NPZ via NMR.
+
+    Args:
+        xt_path: path to .x_t file
+        npz_path: output .npz path
+        tess_max_width: max facet width for tessellation (critical for edge
+            vertex quality — coarse tessellation marks nearly all vertices
+            as edge vertices)
+    """
+    import subprocess
+
+    nmr_bin = find_nmr_binary()
+    if not nmr_bin:
+        raise RuntimeError('NMR binary not found. Set NMR_BIN env var.')
+
+    env = dict(os.environ)
+    dyld = find_parasolid_dyld()
+    if dyld:
+        env['DYLD_LIBRARY_PATH'] = dyld
+
+    cmd = [nmr_bin, '--convert', xt_path, '--tess-max-width', str(tess_max_width), '-o', npz_path]
+    result = subprocess.run(cmd, env=env, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f'NMR convert failed: {result.stderr}')
+    return npz_path
+
+
 def load_parasolid_npz(npz_path):
     """
     Load a Parasolid-generated NPZ file.
@@ -50,6 +108,15 @@ def load_parasolid_npz(npz_path):
     vertices = data['vertices']          # [V, 3] float64
     faces = data['faces']                # [F, 3] int32
     edge_vertices = data['edge_vertices']  # [E]  int32
+
+    # Warn if edge vertex ratio is suspiciously high (likely coarse tessellation)
+    n_unique = len(set(edge_vertices.tolist())) if len(edge_vertices) > 0 else 0
+    n_verts = vertices.shape[0]
+    if n_verts > 0 and n_unique / n_verts > 0.5:
+        print(f"  WARNING: {n_unique}/{n_verts} ({100*n_unique/n_verts:.0f}%) vertices "
+              f"marked as edge vertices — tessellation may be too coarse. "
+              f"Re-run NMR with --tess-max-width 0.02")
+
     return vertices, faces, edge_vertices
 
 
@@ -259,7 +326,12 @@ if __name__ == '__main__':
                         help='Directory to save processed data')
     parser.add_argument('--npz_dir', type=str, default=None,
                         help='Directory containing Parasolid NPZ files '
-                             '(output of "nmr --convert input.x_t -o {sha256}.npz")')
+                             '(output of "nmr --convert input.x_t --tess-max-width 0.02 -o {sha256}.npz"). '
+                             'If a file is missing, NMR will be invoked automatically.')
+    parser.add_argument('--tess_max_width', type=float, default=0.02,
+                        help='Max facet width for NMR tessellation (default 0.02). '
+                             'IMPORTANT: coarse tessellation (default NMR) marks nearly '
+                             'all vertices as edge vertices, producing garbage UDF.')
     parser.add_argument('--num_samples', type=int, default=100000,
                         help='Number of surface points to sample for UDF')
     parser.add_argument('--resolution', type=int, default=256,
@@ -333,20 +405,43 @@ if __name__ == '__main__':
             records.append({'sha256': sha256, 'has_mesh': True, 'has_udf': True})
             metadata = metadata[metadata['sha256'] != sha256]
 
-    # Build work items — locate Parasolid NPZ for each instance
+    # Build work items — locate or generate Parasolid NPZ for each instance
     npz_dir = opt.npz_dir
+    npz_gen_dir = os.path.join(opt.output_dir, 'npz_converted')
     work_items = []
     skipped_missing = 0
+    n_converted = 0
     for _, row in metadata.iterrows():
         sha256 = row['sha256']
 
         # Look for {sha256}.npz in the npz_dir
+        npz_path = None
         if npz_dir:
             npz_path = os.path.join(npz_dir, f'{sha256}.npz')
-        else:
-            npz_path = None
+            if not os.path.exists(npz_path):
+                npz_path = None
 
-        if npz_path and os.path.exists(npz_path):
+        # If no pre-built NPZ, try to convert from raw x_t file via NMR
+        if npz_path is None:
+            raw_xt = os.path.join(opt.output_dir, 'raw', f'{sha256}.x_t')
+            if not os.path.exists(raw_xt):
+                # Try source_path from metadata
+                raw_xt = row.get('source_path', '')
+            if raw_xt and os.path.exists(raw_xt):
+                os.makedirs(npz_gen_dir, exist_ok=True)
+                gen_path = os.path.join(npz_gen_dir, f'{sha256}.npz')
+                if os.path.exists(gen_path):
+                    npz_path = gen_path
+                else:
+                    try:
+                        convert_xt_to_npz(raw_xt, gen_path,
+                                          tess_max_width=opt.tess_max_width)
+                        npz_path = gen_path
+                        n_converted += 1
+                    except Exception as e:
+                        print(f"  NMR convert failed for {sha256}: {e}")
+
+        if npz_path:
             work_items.append({
                 'npz_path':     npz_path,
                 'sha256':       sha256,
@@ -357,8 +452,11 @@ if __name__ == '__main__':
                 'edge_threshold': opt.edge_threshold,
             })
         else:
-            print(f"Parasolid NPZ not found for {sha256}: {npz_path}")
+            print(f"Parasolid NPZ not found for {sha256} (no npz_dir entry, no raw x_t)")
             skipped_missing += 1
+
+    if n_converted:
+        print(f'  Converted {n_converted} x_t files via NMR (--tess-max-width {opt.tess_max_width})')
 
     n_workers = min(opt.max_workers, len(work_items)) if work_items else 1
     print(f'Processing {len(work_items)} instances with {n_workers} workers...')
