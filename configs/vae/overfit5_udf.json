@@ -1,0 +1,77 @@
+{
+    "models": {
+        "decoder": {
+            "name": "ElasticSLatUDFDecoder",
+            "args": {
+                "resolution": 64,
+                "model_channels": 768,
+                "latent_channels": 8,
+                "num_blocks": 12,
+                "num_heads": 12,
+                "mlp_ratio": 4,
+                "attn_mode": "swin",
+                "window_size": 8,
+                "use_fp16": true,
+                "representation_config": {}
+            }
+        }
+    },
+    "dataset": {
+        "name": "SLat2UDF",
+        "args": {
+            "latent_model": "dinov2_vitl14_reg_slat_enc_swin8_B_64l8_fp16",
+            "num_surface_points": 10000,
+            "min_aesthetic_score": 0,
+            "max_num_voxels": 32768,
+            "augment_points": true,
+            "include_instances": [
+                "ee88ce4747f66c9d0c97c546ad0b920c2029f9b3dc6bd5d59591890561c7aefe",
+                "914dc29aa0451d3dbd2dd687f436528e739ac62d736f881d0bf69fefee1755f8",
+                "74d7bab4de82def1adf840f1dc908388ddfef8f14dbf99c6b00d822c8124ac55",
+                "51112d9fdb2136309e571ee066b0dacf8bc93edec75c3ac5d44e6ebc91c0d1c9",
+                "3b663a36a2a3d92068d1a528fa830f42cdcefff216e8b551f14df84988249b5c"
+            ]
+        }
+    },
+    "trainer": {
+        "name": "SLatVaeUDFDecoderTrainer",
+        "args": {
+            "max_steps": 10000,
+            "batch_size_per_gpu": 4,
+            "batch_split": 4,
+            "optimizer": {
+                "name": "AdamW",
+                "args": {
+                    "lr": 1e-4,
+                    "weight_decay": 0.0
+                }
+            },
+            "ema_rate": [
+                0.9999
+            ],
+            "fp16_mode": "inflat_all",
+            "fp16_scale_growth": 0.001,
+            "elastic": {
+                "name": "LinearMemoryController",
+                "args": {
+                    "target_ratio": 0.75,
+                    "max_mem_ratio_start": 0.5
+                }
+            },
+            "grad_clip": {
+                "name": "AdaptiveGradClipper",
+                "args": {
+                    "max_norm": 1.0,
+                    "clip_percentile": 95
+                }
+            },
+            "i_log": 20,
+            "i_sample": 200,
+            "i_save": 1000,
+            "loss_type": "smooth_l1",
+            "lambda_reg": 0.1,
+            "lambda_edge_weight": 2.0,
+            "edge_threshold": 0.05
+        }
+    }
+}

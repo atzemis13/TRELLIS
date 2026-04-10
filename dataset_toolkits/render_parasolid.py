@@ -149,8 +149,8 @@ def _render_instance(file_path, sha256, output_dir, num_views, renderer_path, np
         if 'offset' in udf_data:
             offset_vec = udf_data['offset'].tolist()
         norm_args = [
-            '--scale', str(scale),
-            '--offset', str(offset_vec[0]), str(offset_vec[1]), str(offset_vec[2]),
+            '--scale', f'{scale:.10f}',
+            '--offset', f'{offset_vec[0]:.10f}', f'{offset_vec[1]:.10f}', f'{offset_vec[2]:.10f}',
         ]
 
     # Write views.json for renderer
