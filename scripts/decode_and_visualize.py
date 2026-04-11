@@ -39,6 +39,8 @@ def parse_args():
     p.add_argument('--udf_config', default='configs/vae/overfit5_udf.json', help='UDF decoder config')
     p.add_argument('--mesh_model', default='microsoft/TRELLIS-image-large/ckpts/slat_dec_mesh_swin8_B_64l8m256c_fp16',
                    help='Pretrained mesh decoder (HuggingFace path or local)')
+    p.add_argument('--use_original_mesh', action='store_true',
+                   help='Paint UDF onto the original Parasolid mesh instead of the decoded mesh')
     p.add_argument('--output_dir', required=True, help='Output directory for visualizations')
     p.add_argument('--thresholds', type=float, nargs='+', default=[0.05, 0.1, 0.2, 0.5],
                    help='UDF thresholds for edge painting')
@@ -189,7 +191,8 @@ def main():
     print(f'Thresholds: {args.thresholds}')
 
     # Load models
-    mesh_decoder = load_mesh_decoder(args.mesh_model)
+    if not args.use_original_mesh:
+        mesh_decoder = load_mesh_decoder(args.mesh_model)
     udf_decoder = load_udf_decoder(args.udf_config, args.udf_ckpt)
 
     summary_rows = []
@@ -202,27 +205,47 @@ def main():
         print(f'  Latent: {st.feats.shape[0]} voxels, {st.feats.shape[1]} channels')
 
         with torch.no_grad():
-            # Decode mesh
-            mesh_results = mesh_decoder(st)
-            mesh = mesh_results[0]
-            if not mesh.success:
-                print(f'  WARN: mesh extraction failed, skipping')
-                continue
-            verts = mesh.vertices.cpu().numpy()
-            faces = mesh.faces.cpu().numpy()
-            print(f'  Mesh: {verts.shape[0]} vertices, {faces.shape[0]} faces')
-
-            # Decode UDF
+            # Decode UDF grid
             udf_results = udf_decoder(st)
             udf_result = udf_results[0]
             if not udf_result.success:
                 print(f'  WARN: UDF extraction failed, skipping')
                 continue
 
-            # Interpolate UDF at mesh vertices
-            vertex_udf = interpolate_udf_to_points(
-                udf_result.udf_grid, mesh.vertices, res=256
-            ).cpu().numpy()
+            # Save the raw 257³ UDF grid (for offline querying at arbitrary points)
+            grid_path = os.path.join(args.output_dir, f'{sha256}_udf_grid.npz')
+            np.savez_compressed(grid_path, udf_grid=udf_result.udf_grid.cpu().numpy())
+            print(f'  Saved UDF grid [257³]: {grid_path}')
+
+            if args.use_original_mesh:
+                # Load the original Parasolid mesh
+                import trimesh
+                mesh_path = os.path.join(args.data_dir, 'meshes', f'{sha256}.obj')
+                original = trimesh.load(mesh_path, process=False)
+                verts = original.vertices.astype(np.float32)
+                faces = original.faces.astype(np.int64)
+                print(f'  Original mesh: {verts.shape[0]} vertices, {faces.shape[0]} faces')
+
+                vertex_udf = interpolate_udf_to_points(
+                    udf_result.udf_grid,
+                    torch.from_numpy(verts).cuda(),
+                    res=256
+                ).cpu().numpy()
+            else:
+                # Decode mesh
+                mesh_results = mesh_decoder(st)
+                mesh = mesh_results[0]
+                if not mesh.success:
+                    print(f'  WARN: mesh extraction failed, skipping')
+                    continue
+                verts = mesh.vertices.cpu().numpy()
+                faces = mesh.faces.cpu().numpy()
+                print(f'  Decoded mesh: {verts.shape[0]} vertices, {faces.shape[0]} faces')
+
+                vertex_udf = interpolate_udf_to_points(
+                    udf_result.udf_grid, mesh.vertices, res=256
+                ).cpu().numpy()
+
             print(f'  UDF range: [{vertex_udf.min():.4f}, {vertex_udf.max():.4f}], '
                   f'median={np.median(vertex_udf):.4f}')
 
