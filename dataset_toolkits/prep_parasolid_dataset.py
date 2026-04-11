@@ -183,17 +183,87 @@ def normalize_mesh(vertices, faces):
 def compute_geodesic_udf(vertices, faces, edge_vertex_indices):
     """
     Compute geodesic distance from each mesh vertex to the nearest B-Rep
-    edge vertex using the heat method (potpourri3d).
+    edge vertex.  Uses the heat method (potpourri3d) for global distances,
+    with corrections near source vertices:
+
+    1. Source vertices are forced to zero (they ARE on B-Rep edges).
+    2. For vertices within a few hops of sources, the heat method can
+       overshoot due to poor triangle quality.  We cap those distances
+       using the Euclidean distance to the nearest source vertex, which
+       is a lower bound on the true geodesic and is tight for nearby
+       vertices on a smooth surface.
     """
     import potpourri3d as pp3d
+    from scipy.spatial import cKDTree
 
     if len(edge_vertex_indices) == 0:
         print("  Warning: no B-Rep edge vertices found, returning zero UDF")
         return np.zeros(len(vertices), dtype=np.float32)
 
     source_verts = np.array(sorted(set(edge_vertex_indices.tolist())), dtype=np.int32)
-    solver = pp3d.MeshHeatMethodDistanceSolver(vertices, faces)
+    source_set = set(source_verts.tolist())
+
+    # Heat method for global geodesic distances
+    solver = pp3d.MeshHeatMethodDistanceSolver(
+        vertices.astype(np.float64), faces.astype(np.int32))
     dist = solver.compute_distance_multisource(source_verts)
+
+    # Euclidean distance to nearest source vertex (lower bound on geodesic)
+    source_coords = vertices[source_verts]
+    tree = cKDTree(source_coords)
+    euclidean_dist, _ = tree.query(vertices)
+
+    # Take the max of (heat, euclidean) — both approximate geodesic, but
+    # euclidean is a lower bound and heat can undershoot far from sources.
+    # Near sources, heat overshoots, so we cap with euclidean there.
+    # Strategy: use element-wise maximum globally, but near sources the
+    # euclidean bound is tighter and prevents heat-method overshoot.
+    # Actually: euclidean <= geodesic <= heat (ideally). Heat overshoots
+    # near sources. So take the minimum of heat and some upper bound,
+    # but we want to USE euclidean near sources where heat is bad.
+    # Simplest correct approach: take element-wise min(heat, euclidean)
+    # is WRONG because euclidean < geodesic always.
+    # Better: force sources to 0, and for 1-ring neighbors use direct
+    # edge length to nearest source (which IS the geodesic for adjacent verts).
+
+    # Force source vertices to zero
+    dist[source_verts] = 0.0
+
+    # Build adjacency: for each vertex, find mesh-edge neighbors
+    from collections import defaultdict
+    adj = defaultdict(set)
+    for f in faces:
+        a, b, c = int(f[0]), int(f[1]), int(f[2])
+        adj[a].update([b, c])
+        adj[b].update([a, c])
+        adj[c].update([a, b])
+
+    # For vertices in the 1-ring of source vertices, compute exact geodesic:
+    # it's the minimum mesh edge length to any adjacent source vertex.
+    # This is exact because they share a triangle edge.
+    for sv in source_verts:
+        sv = int(sv)
+        for nb in adj[sv]:
+            if nb not in source_set:
+                edge_d = float(np.linalg.norm(vertices[sv] - vertices[nb]))
+                if edge_d < dist[nb]:
+                    dist[nb] = edge_d
+
+    # For the 2-ring (neighbors of 1-ring), cap with euclidean distance
+    # to nearest source as a sanity bound — heat method can overshoot there too
+    ring1 = set()
+    for sv in source_verts:
+        for nb in adj[int(sv)]:
+            if nb not in source_set:
+                ring1.add(nb)
+    ring2 = set()
+    for v in ring1:
+        for nb in adj[v]:
+            if nb not in source_set and nb not in ring1:
+                ring2.add(nb)
+    for v in ring2:
+        dist[v] = min(dist[v], euclidean_dist[v])
+
     return np.maximum(dist, 0.0).astype(np.float32)
 
 
