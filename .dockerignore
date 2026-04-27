@@ -1,0 +1,16 @@
+.git
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+datasets/
+results/
+ckpts/
+outputs/
+tmp/
+*.glb
+*.ply
+*.mp4
+.DS_Store
+node_modules

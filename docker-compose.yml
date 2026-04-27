@@ -1,0 +1,23 @@
+services:
+  trellis:
+    build: .
+    image: trellis:cu118
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices: [{capabilities: [gpu]}]
+    shm_size: "32gb"
+    volumes:
+      - ${DATASETS_DIR:-./datasets}:/workspace/datasets
+      - ${OUTPUTS_DIR:-./outputs}:/workspace/outputs
+      - hf-cache:/workspace/.cache/huggingface
+    working_dir: /workspace/TRELLIS
+    environment:
+      - WANDB_API_KEY
+      - HF_TOKEN
+      - CUDA_VISIBLE_DEVICES
+    command: bash
+
+volumes:
+  hf-cache:
